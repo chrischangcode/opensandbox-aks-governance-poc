@@ -292,6 +292,10 @@ async def run_ephemeral(template_name: str, command: str) -> str:
             await sandbox.close()
         await delete_sandbox(sandbox_id)
         cleaned_up = await wait_for_cleanup(sandbox_id, pod_name)
+    if not cleaned_up:
+        raise RuntimeError(
+            "sandbox deletion was requested but Kubernetes cleanup was not confirmed"
+        )
     result["cleanedUp"] = cleaned_up
     return json.dumps(result, indent=2)
 

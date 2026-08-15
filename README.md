@@ -14,6 +14,15 @@ It extends the public [AKS Kata example](https://github.com/opensandbox-group/Op
 > [!WARNING]
 > The local development login is intentionally restricted to a loopback address. It is for port-forwarded POC use only. Do not expose it through an ingress or load balancer.
 
+## See it in action
+
+[Open the visual live-demo report](docs/live-demo-report.md), including the
+architecture, exact redacted commands, terminal transcripts, and replay steps.
+
+| Running Kata sandbox | Administrator-controlled template |
+|---|---|
+| ![Running governed sandbox](docs/assets/requester-dashboard.png) | ![Administrator sandbox template](docs/assets/admin-templates.png) |
+
 ## Prerequisites
 
 - An Azure subscription where you can create AKS, ACR, role assignments, and resource groups
@@ -253,6 +262,41 @@ subagents. Its only execution tool creates a fresh sandbox through
 command only when the bundle's command policy allows it, captures attribution
 evidence, and confirms the assignment, workload, and Pod are gone before
 reporting cleanup complete.
+
+## Replay the full live demonstration
+
+After deploying OpenSandbox and `assignmentd`, install the optional screenshot
+browser once:
+
+```bash
+npx playwright install chromium
+```
+
+Run the complete presentation:
+
+```bash
+./scripts/live-demo.sh
+```
+
+The script:
+
+1. Applies the immutable templates and boundaries.
+2. Starts loopback-only requester and administrator pages.
+3. Runs the allowed and denied OpenCode examples.
+4. Creates a Kata sandbox for the egress demonstration.
+5. Produces deny, request, approve, and allow decisions through the real pages.
+6. Captures screenshots and terminal logs under `demo-output/<timestamp>/`.
+7. Keeps the pages open until Enter is pressed, then deletes its sandbox and
+   stops only the local processes it created.
+
+For an unattended replay:
+
+```bash
+./scripts/live-demo.sh --no-pause
+```
+
+Set `RUN_OPENCODE=false` to demonstrate only the governance UI and egress flow,
+or `CAPTURE_SCREENSHOTS=false` to skip screenshots.
 
 ## Cleanup
 

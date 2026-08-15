@@ -842,7 +842,7 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 <title>Sandbox governance admin</title><style>` + governanceStyles + `</style></head><body>
 <nav><a href="{{.BasePath}}/">Sandbox dashboard</a><a href="{{.BasePath}}/access">Access</a><a href="{{.BasePath}}/admin">Admin</a><span>{{.IdentityName}}</span></nav>
 <main><h1>Sandbox governance admin <small>POC</small></h1>{{if .Message}}<p class="message">{{.Message}}</p>{{end}}
-<section><h2>Approved sandbox templates</h2><table><thead><tr><th>Template</th><th>Runtime</th><th>Capability boundary</th><th>Limits</th><th>Enabled</th></tr></thead><tbody>
+<section id="approved-templates"><h2>Approved sandbox templates</h2><table><thead><tr><th>Template</th><th>Runtime</th><th>Capability boundary</th><th>Limits</th><th>Enabled</th></tr></thead><tbody>
 {{range .Templates}}<tr><td><code>{{.Name}}</code><br>{{.DisplayName}}<br>{{.Description}}</td><td>{{.Image}}<br><code>{{.Entrypoint}}</code></td><td>{{.CapabilityBundle}}</td><td>{{.CPU}} / {{.Memory}}<br>{{.Timeout}}</td><td>{{.Enabled}}</td></tr>{{else}}<tr><td colspan="5">No sandbox templates found.</td></tr>{{end}}
 </tbody></table>
 <h3>Create immutable template revision</h3>
@@ -858,7 +858,7 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 <label>Lifetime seconds<input name="timeoutSeconds" type="number" min="60" max="3600" value="1800" required></label>
 <label>Enabled<select name="enabled"><option value="true">true</option><option value="false">false</option></select></label>
 <button type="submit">Create template</button></form></section>
-<section><h2>Access requests</h2><table><thead><tr><th>Request</th><th>Requester / reason</th><th>Exact target</th><th>Decision</th></tr></thead><tbody>
+<section id="access-requests"><h2>Access requests</h2><table><thead><tr><th>Request</th><th>Requester / reason</th><th>Exact target</th><th>Decision</th></tr></thead><tbody>
 {{range .Requests}}<tr><td><code>{{.Name}}</code><br>{{.State}}<br>{{.Assignment}}<br>requested {{.RequestedDuration}}</td><td>{{.Requester}}<br>{{.Reason}}</td><td><code>{{.Target}}</code></td><td>
 {{if eq .State "Pending"}}<form method="post" action="{{.ApproveAction}}"><input type="hidden" name="csrf" value="{{$.CSRFToken}}"><label>Decision reason<textarea name="decisionReason" maxlength="512" required></textarea></label><label>Duration (minutes)<input name="durationMinutes" type="number" min="1" max="{{.RequestedMinutes}}" value="{{.RequestedMinutes}}" required></label><button type="submit">Approve</button></form>
 <form method="post" action="{{.DenyAction}}"><input type="hidden" name="csrf" value="{{$.CSRFToken}}"><label>Decision reason<textarea name="decisionReason" maxlength="512" required></textarea></label><button class="deny" type="submit">Deny</button></form>
@@ -867,6 +867,6 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 {{range .Bundles}}<tr><td>{{.Name}}</td><td>{{.Boundary}}</td><td>{{.LogicalTenant}} / {{.Team}}</td><td>{{.Permission}}</td></tr>{{else}}<tr><td colspan="4">No bundles found.</td></tr>{{end}}</tbody></table></section>
 <section><h2>Current assignments</h2><table><thead><tr><th>Assignment / sandbox</th><th>Bundle</th><th>Boundary</th><th>Permission</th><th>Ready</th></tr></thead><tbody>
 {{range .Assignments}}<tr><td>{{.Name}}<br>{{.SandboxID}}</td><td>{{.Bundle}}</td><td>{{.Boundary}}</td><td>{{.Permission}}</td><td>{{.Ready}}</td></tr>{{else}}<tr><td colspan="5">No assignments found.</td></tr>{{end}}</tbody></table></section>
-<section><h2>Recent egress events</h2><table><thead><tr><th>Time / sandbox</th><th>Target</th><th>Decision</th><th>Reason</th></tr></thead><tbody>
+<section id="recent-egress-events"><h2>Recent egress events</h2><table><thead><tr><th>Time / sandbox</th><th>Target</th><th>Decision</th><th>Reason</th></tr></thead><tbody>
 {{range .Events}}<tr><td>{{.Timestamp}}<br>{{.SandboxID}}</td><td><code>{{.Method}} {{.Backend}}://{{.Host}}{{.Path}}</code></td><td>{{.Allowed}} / {{.Source}}<br>{{.AccessRequest}}</td><td>{{.Reason}}</td></tr>{{else}}<tr><td colspan="4">No egress events found.</td></tr>{{end}}</tbody></table></section>
 </main></body></html>`))
