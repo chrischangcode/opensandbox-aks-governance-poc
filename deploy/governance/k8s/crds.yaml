@@ -1,6 +1,94 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  name: sandboxtemplates.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: sandboxtemplates
+    singular: sandboxtemplate
+    kind: SandboxTemplate
+    shortNames: [sbtemplate]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Image
+          type: string
+          jsonPath: .spec.image
+        - name: Capability
+          type: string
+          jsonPath: .spec.capabilityBundleRef.name
+        - name: Enabled
+          type: boolean
+          jsonPath: .spec.enabled
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [displayName, image, entrypoint, capabilityBundleRef, resources, timeoutSeconds, enabled]
+              properties:
+                displayName:
+                  type: string
+                  minLength: 3
+                  maxLength: 128
+                description:
+                  type: string
+                  maxLength: 512
+                image:
+                  type: string
+                  minLength: 1
+                  maxLength: 512
+                  pattern: '^.+@sha256:[a-f0-9]{64}$'
+                entrypoint:
+                  type: array
+                  minItems: 1
+                  maxItems: 32
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 512
+                capabilityBundleRef:
+                  type: object
+                  required: [name, policyRevision]
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                      maxLength: 253
+                    policyRevision:
+                      type: string
+                      pattern: '^sha256:[a-f0-9]{64}$'
+                resources:
+                  type: object
+                  required: [cpu, memory]
+                  properties:
+                    cpu:
+                      type: string
+                      minLength: 1
+                      maxLength: 32
+                    memory:
+                      type: string
+                      minLength: 1
+                      maxLength: 32
+                timeoutSeconds:
+                  type: integer
+                  minimum: 60
+                  maximum: 3600
+                enabled:
+                  type: boolean
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: SandboxTemplate.spec is immutable; create a new template revision instead
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
   name: capabilitybundles.aks-sandbox.azure.com
 spec:
   group: aks-sandbox.azure.com
@@ -123,6 +211,9 @@ spec:
                     name:
                       type: string
                       minLength: 1
+                    policyRevision:
+                      type: string
+                      pattern: '^sha256:[a-f0-9]{64}$'
               x-kubernetes-validations:
                 - rule: self == oldSelf
                   message: SandboxAssignment.spec is immutable

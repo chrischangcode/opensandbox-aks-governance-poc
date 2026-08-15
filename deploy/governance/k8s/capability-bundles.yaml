@@ -37,3 +37,20 @@ spec:
     team: readers
     permissionLevel: reader
     displayName: Team B read-only sandbox
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: CapabilityBundle
+metadata:
+  name: team-a-harness-reader-v1
+  namespace: aks-sandbox-system
+spec:
+  governance:
+    logicalTenant: tenant-a
+    team: readers
+    permissionLevel: reader
+    displayName: Team A sandbox-only harness
+  harness:
+    commandPolicy:
+      - pattern: '^uname -a && python --version$'
+        decision: allow
+        reason: Read-only runtime identity demonstration.

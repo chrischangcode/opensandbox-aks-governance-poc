@@ -1,0 +1,18 @@
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: python-kata-reader-v1
+  namespace: aks-sandbox-system
+spec:
+  displayName: Python Kata reader
+  description: Ephemeral Python sandbox with the Team A reader boundary.
+  image: python@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4
+  entrypoint: [tail, -f, /dev/null]
+  capabilityBundleRef:
+    name: team-a-harness-reader-v1
+    policyRevision: sha256:35a06d9b5696b4560d900f0f8acacbe7f3f343293b4f8ad1c4bb1d1c64639ed9
+  resources:
+    cpu: 500m
+    memory: 512Mi
+  timeoutSeconds: 1800
+  enabled: true

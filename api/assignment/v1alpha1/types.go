@@ -86,6 +86,40 @@ type CommandPolicyRule struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
+// SandboxTemplate is an immutable administrator-approved sandbox shape.
+// +kubebuilder:object:root=true
+type SandboxTemplate struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              SandboxTemplateSpec `json:"spec"`
+}
+
+// SandboxTemplateList is a list of SandboxTemplate resources.
+// +kubebuilder:object:root=true
+type SandboxTemplateList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []SandboxTemplate `json:"items"`
+}
+
+// SandboxTemplateSpec selects the runtime shape and immutable capability boundary.
+type SandboxTemplateSpec struct {
+	DisplayName         string                    `json:"displayName"`
+	Description         string                    `json:"description,omitempty"`
+	Image               string                    `json:"image"`
+	Entrypoint          []string                  `json:"entrypoint"`
+	CapabilityBundleRef CapabilityBundleReference `json:"capabilityBundleRef"`
+	Resources           SandboxTemplateResources  `json:"resources"`
+	TimeoutSeconds      int64                     `json:"timeoutSeconds"`
+	Enabled             bool                      `json:"enabled"`
+}
+
+// SandboxTemplateResources contains sandbox CPU and memory limits.
+type SandboxTemplateResources struct {
+	CPU    string `json:"cpu"`
+	Memory string `json:"memory"`
+}
+
 // SandboxAssignment binds one capability bundle to one sandbox Pod incarnation.
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -111,7 +145,8 @@ type SandboxAssignmentSpec struct {
 
 // CapabilityBundleReference names a bundle in the assignment namespace.
 type CapabilityBundleReference struct {
-	Name string `json:"name"`
+	Name           string `json:"name"`
+	PolicyRevision string `json:"policyRevision,omitempty"`
 }
 
 // SandboxAssignmentStatus contains controller-verified runtime binding state.
@@ -241,6 +276,7 @@ type SandboxEgressEventSpec struct {
 func AddToScheme(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(GroupVersion,
 		&CapabilityBundle{}, &CapabilityBundleList{},
+		&SandboxTemplate{}, &SandboxTemplateList{},
 		&SandboxAssignment{}, &SandboxAssignmentList{},
 		&SandboxAccessRequest{}, &SandboxAccessRequestList{},
 		&SandboxEgressEvent{}, &SandboxEgressEventList{},

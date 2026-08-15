@@ -30,6 +30,7 @@ It extends the public [AKS Kata example](https://github.com/opensandbox-group/Op
 | `cmd/assignmentd/` | Assignment lifecycle facade and egress authorization service |
 | `cmd/aks-sandbox-dashboard/` | Requester and administrator pages |
 | `cmd/egress-probe/` | Sends an attributed authorization decision for a live sandbox |
+| `docs/live-demo-report.md` | Captured OpenCode, Kata, cleanup, and egress approval evidence |
 
 ## 1. Deploy OpenSandbox on AKS
 
@@ -74,6 +75,7 @@ Install the data model, logical boundaries, and sandbox ServiceAccount:
 kubectl create namespace aks-sandbox-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f deploy/governance/k8s/crds.yaml
 kubectl apply -f deploy/governance/k8s/capability-bundles.yaml
+kubectl apply -f deploy/governance/k8s/sandbox-templates.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-serviceaccount.yaml
 ```
 
@@ -153,6 +155,11 @@ Open:
 - Access requests: <http://127.0.0.1:18081/dashboard/access>
 - Administration: <http://127.0.0.1:18082/dashboard/admin>
 
+The administrator page can create immutable `SandboxTemplate` revisions. Each
+template selects a digest-pinned image, entrypoint, CPU/memory limit, lifetime,
+and exact capability-bundle policy revision. Harnesses can only select enabled
+templates.
+
 Create a sandbox from the requester page and wait for its assignment to become ready:
 
 ```bash
@@ -205,6 +212,47 @@ Changing the backend, method, host, path, assignment UID, or bundle revision doe
 - Logical tenants in this POC are governance labels, not Azure tenant or Kubernetes namespace isolation.
 
 The `egress-probe` exercises the same authorization and telemetry path used by an egress gateway. It does not itself forward network packets.
+
+## OpenCode sandbox-only harness
+
+Install OpenCode in the current WSL user profile:
+
+```bash
+npm install --prefix "$HOME/.local" -g opencode-ai@latest
+export PATH="$HOME/.local/bin:$PATH"
+opencode --version
+```
+
+This repository includes:
+
+- `opencode.json` — registers the local `sandbox_governance` MCP server;
+- `.opencode/agents/sandbox-only.md` — denies every built-in tool and allows
+  only the sandbox MCP tools; and
+- `harness/run-mcp.sh` — starts required local port-forwards, reads the
+  Kubernetes API key Secret without printing it, and starts the MCP server.
+
+Check the MCP connection:
+
+```bash
+cd ~/go/opensandbox-aks-governance-poc
+opencode mcp list
+```
+
+Run a non-interactive demonstration using one of OpenCode's listed models:
+
+```bash
+opencode run \
+  --agent sandbox-only \
+  --model opencode/big-pickle \
+  "Use the least-privileged approved template to run: uname -a && python --version"
+```
+
+The agent cannot call host `bash`, edit files, browse the web, or launch
+subagents. Its only execution tool creates a fresh sandbox through
+`assignmentd`, waits for the assignment and Kata Pod to become ready, runs the
+command only when the bundle's command policy allows it, captures attribution
+evidence, and confirms the assignment, workload, and Pod are gone before
+reporting cleanup complete.
 
 ## Cleanup
 

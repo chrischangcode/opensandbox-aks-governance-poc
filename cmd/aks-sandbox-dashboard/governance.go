@@ -34,6 +34,7 @@ var (
 	dashboardBundlesGVR     = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "capabilitybundles"}
 	dashboardRequestsGVR    = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxaccessrequests"}
 	dashboardEventsGVR      = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxegressevents"}
+	dashboardTemplatesGVR   = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxtemplates"}
 )
 
 type governanceDashboard struct {
@@ -75,6 +76,7 @@ type accessPageData struct {
 
 type adminPageData struct {
 	BasePath, IdentityName, CSRFToken, Message string
+	Templates                                  []templatePageRow
 	Requests                                   []requestPageRow
 	Assignments                                []assignmentPageRow
 	Bundles                                    []bundlePageRow
@@ -107,6 +109,7 @@ func (g *governanceDashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /access", g.accessPage)
 	mux.HandleFunc("POST /access/requests", g.createAccessRequest)
 	mux.HandleFunc("GET /admin", g.adminPage)
+	mux.HandleFunc("POST /admin/templates", g.createSandboxTemplate)
 	mux.HandleFunc("POST /admin/requests/{name}/approve", g.approveAccessRequest)
 	mux.HandleFunc("POST /admin/requests/{name}/deny", g.denyAccessRequest)
 }
@@ -151,6 +154,11 @@ func (g *governanceDashboard) adminPage(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
+	templates, err := g.templateRows(r.Context())
+	if err != nil {
+		g.internalError(w, r, "list sandbox templates", err)
+		return
+	}
 	requests, err := g.requestRows(r.Context())
 	if err != nil {
 		g.internalError(w, r, "list access requests", err)
@@ -177,6 +185,7 @@ func (g *governanceDashboard) adminPage(w http.ResponseWriter, r *http.Request) 
 		IdentityName: identity.Name,
 		CSRFToken:    csrf,
 		Message:      r.URL.Query().Get("message"),
+		Templates:    templates,
 		Requests:     requests,
 		Assignments:  assignments,
 		Bundles:      bundles,
@@ -833,6 +842,22 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 <title>Sandbox governance admin</title><style>` + governanceStyles + `</style></head><body>
 <nav><a href="{{.BasePath}}/">Sandbox dashboard</a><a href="{{.BasePath}}/access">Access</a><a href="{{.BasePath}}/admin">Admin</a><span>{{.IdentityName}}</span></nav>
 <main><h1>Sandbox governance admin <small>POC</small></h1>{{if .Message}}<p class="message">{{.Message}}</p>{{end}}
+<section><h2>Approved sandbox templates</h2><table><thead><tr><th>Template</th><th>Runtime</th><th>Capability boundary</th><th>Limits</th><th>Enabled</th></tr></thead><tbody>
+{{range .Templates}}<tr><td><code>{{.Name}}</code><br>{{.DisplayName}}<br>{{.Description}}</td><td>{{.Image}}<br><code>{{.Entrypoint}}</code></td><td>{{.CapabilityBundle}}</td><td>{{.CPU}} / {{.Memory}}<br>{{.Timeout}}</td><td>{{.Enabled}}</td></tr>{{else}}<tr><td colspan="5">No sandbox templates found.</td></tr>{{end}}
+</tbody></table>
+<h3>Create immutable template revision</h3>
+<form method="post" action="{{.BasePath}}/admin/templates"><input type="hidden" name="csrf" value="{{.CSRFToken}}">
+<label>Name<input name="name" maxlength="63" pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?" required></label>
+<label>Display name<input name="displayName" maxlength="128" required></label>
+<label>Description<textarea name="description" maxlength="512"></textarea></label>
+<label>Digest-pinned image<input name="image" maxlength="512" value="python@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4" required></label>
+<label>Entrypoint JSON<input name="entrypoint" maxlength="2048" value='["tail","-f","/dev/null"]' required></label>
+<label>Capability bundle<input name="capabilityBundle" maxlength="253" value="team-a-harness-reader-v1" required></label>
+<label>CPU<input name="cpu" maxlength="32" value="500m" required></label>
+<label>Memory<input name="memory" maxlength="32" value="512Mi" required></label>
+<label>Lifetime seconds<input name="timeoutSeconds" type="number" min="60" max="3600" value="1800" required></label>
+<label>Enabled<select name="enabled"><option value="true">true</option><option value="false">false</option></select></label>
+<button type="submit">Create template</button></form></section>
 <section><h2>Access requests</h2><table><thead><tr><th>Request</th><th>Requester / reason</th><th>Exact target</th><th>Decision</th></tr></thead><tbody>
 {{range .Requests}}<tr><td><code>{{.Name}}</code><br>{{.State}}<br>{{.Assignment}}<br>requested {{.RequestedDuration}}</td><td>{{.Requester}}<br>{{.Reason}}</td><td><code>{{.Target}}</code></td><td>
 {{if eq .State "Pending"}}<form method="post" action="{{.ApproveAction}}"><input type="hidden" name="csrf" value="{{$.CSRFToken}}"><label>Decision reason<textarea name="decisionReason" maxlength="512" required></textarea></label><label>Duration (minutes)<input name="durationMinutes" type="number" min="1" max="{{.RequestedMinutes}}" value="{{.RequestedMinutes}}" required></label><button type="submit">Approve</button></form>

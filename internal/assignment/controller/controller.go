@@ -68,7 +68,7 @@ func New(dynamicClient dynamic.Interface, coreClient kubernetes.Interface, confi
 		panic("assignment controller: namespaces are required")
 	}
 	if len(config.AllowedRuntimeClasses) == 0 {
-		config.AllowedRuntimeClasses = []string{"kata-vm-isolation", "self-kata-clh", "kata-clh"}
+		config.AllowedRuntimeClasses = []string{"kata-vm-isolation", "kata-optimized", "self-kata-clh", "kata-clh"}
 	}
 	if config.Interval <= 0 {
 		config.Interval = 2 * time.Second

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "sandbox_governance": {
+      "type": "local",
+      "command": ["bash", "./harness/run-mcp.sh"],
+      "enabled": true,
+      "timeout": 360000
+    }
+  }
+}

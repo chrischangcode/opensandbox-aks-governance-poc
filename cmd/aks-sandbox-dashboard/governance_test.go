@@ -15,6 +15,7 @@ import (
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/fake"
@@ -105,6 +106,7 @@ func TestGovernanceApproveAndDenyUseAuthenticatedAdmin(t *testing.T) {
 		if response.Code != http.StatusSeeOther {
 			t.Fatalf("approve response = %d body=%s", response.Code, response.Body.String())
 		}
+
 		updated := getDashboardAccessRequest(t, governanceDashboard, "access-a")
 		if updated.Status.State != assignmentv1alpha1.SandboxAccessRequestApproved || updated.Status.Approver == nil ||
 			updated.Status.Approver.ObjectID != testAdminID || !updated.Status.ExpiresAt.Time.Equal(now.Add(30*time.Minute)) {
@@ -127,6 +129,35 @@ func TestGovernanceApproveAndDenyUseAuthenticatedAdmin(t *testing.T) {
 			t.Fatalf("denied status = %+v", updated.Status)
 		}
 	})
+}
+
+func TestGovernanceAdminCreatesImmutableSandboxTemplate(t *testing.T) {
+	governanceDashboard, handler := newGovernanceTestHandler(t, governanceFixtureObjects(t)...)
+	admin := authenticatedIdentity{TenantID: testTenantID, ObjectID: testAdminID, Name: "Administrator", Roles: []string{"OpenSandbox.Admin"}}
+	form := url.Values{
+		"csrf": {"csrf"}, "name": {"python-reader-v1"}, "displayName": {"Python reader"},
+		"description": {"Governed Python sandbox."}, "image": {"python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		"entrypoint": {`["tail","-f","/dev/null"]`}, "capabilityBundle": {"coding"},
+		"cpu": {"500m"}, "memory": {"512Mi"}, "timeoutSeconds": {"1800"}, "enabled": {"true"},
+	}
+	response := serveGovernance(handler, http.MethodPost, "/admin/templates", form, admin, "csrf")
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("create template response = %d body=%s", response.Code, response.Body.String())
+	}
+	object, err := governanceDashboard.client.Resource(dashboardTemplatesGVR).Namespace("aks-sandbox-system").Get(
+		context.Background(), "python-reader-v1", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, _, _ := unstructured.NestedString(object.Object, "spec", "image")
+	bundle, _, _ := unstructured.NestedString(object.Object, "spec", "capabilityBundleRef", "name")
+	revision, _, _ := unstructured.NestedString(object.Object, "spec", "capabilityBundleRef", "policyRevision")
+	timeout, _, _ := unstructured.NestedInt64(object.Object, "spec", "timeoutSeconds")
+	if image != "python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ||
+		bundle != "coding" || !strings.HasPrefix(revision, "sha256:") || timeout != 1800 {
+		t.Fatalf("created template = %#v", object.Object["spec"])
+	}
 }
 
 func newGovernanceTestHandler(t *testing.T, objects ...runtime.Object) (*governanceDashboard, http.Handler) {
