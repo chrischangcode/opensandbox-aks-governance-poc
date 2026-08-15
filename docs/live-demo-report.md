@@ -85,6 +85,35 @@ flowchart LR
     Events --> AdminUI
 ```
 
+## Egress identity limitation and production path
+
+The live environment explicitly runs `assignmentd` in `external-mediator`
+identity mode. Upstream OpenSandbox currently replaces additional containers
+from the base Pod template during sandbox creation, so this integration cannot
+reliably preserve a trusted egress sidecar next to the user-controlled
+container.
+
+The live authorization path therefore keeps credentials outside the sandbox:
+
+1. The sandbox Pod disables automatic ServiceAccount token mounting and
+   contains no projected Kubernetes token.
+2. A trusted external probe or gateway requests a short-lived,
+   audience-restricted token bound to the exact Pod UID.
+3. `assignmentd` verifies that token and fences the decision by assignment,
+   capability revision, backend, method, normalized host, normalized path, and
+   temporary-grant expiration.
+4. The decision is emitted as sanitized, per-sandbox telemetry.
+
+This demonstrates authorization and attribution rather than transparent
+interception of every sandbox network connection.
+
+`projected-sidecar` remains the fail-closed controller default for production.
+A mutating admission webhook or equivalent integration would inject the egress
+proxy and mount the Pod-bound identity only into that trusted sidecar. The user
+container would not receive the credential. A missing or malformed sidecar,
+identity projection, or isolation boundary keeps the assignment unready and
+denies mediated egress.
+
 ## Reproduce this demonstration
 
 The checked-in replay script performs the same flow, captures screenshots and
@@ -618,9 +647,5 @@ git diff check: passed
   backend, HTTP method, normalized host, normalized path, or expiration differs.
 - Audit events omit headers, queries, bodies, source IPs, credentials, and
   tokens.
-- The live POC explicitly uses `external-mediator` identity mode because the
-  upstream OpenSandbox create path replaces additional template containers.
-  `projected-sidecar` remains the fail-closed controller default for a
-  production egress data plane.
 - Logical tenants are demonstrated as governance boundaries; this POC does not
   claim physical Azure tenant isolation.

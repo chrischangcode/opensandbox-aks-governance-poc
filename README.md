@@ -222,13 +222,39 @@ kubectl get sandboxegressevents -n aks-sandbox-system \
 
 Changing the backend, method, host, path, assignment UID, or bundle revision does not reuse the approval.
 
+## Egress identity modes
+
+The live POC uses `external-mediator` mode because the upstream OpenSandbox
+create path replaces additional containers from the base Pod template. That
+means this integration cannot yet reliably retain a trusted egress sidecar next
+to the user-controlled sandbox container.
+
+In `external-mediator` mode:
+
+- the sandbox has `automountServiceAccountToken: false` and receives no
+  projected Kubernetes token;
+- a trusted external probe or gateway requests a short-lived,
+  audience-restricted token bound to the exact sandbox Pod;
+- `assignmentd` validates the token, Pod, assignment, capability revision,
+  destination, and any temporary access grant; and
+- the resulting decision and sanitized telemetry are attributed to that
+  sandbox.
+
+This proves per-sandbox authorization and attribution, but it does not claim
+transparent interception of every network connection made by the sandbox.
+
+For a production data plane, `projected-sidecar` remains the fail-closed
+controller default. A mutating admission webhook or equivalent integration
+would inject the egress proxy and mount the Pod-bound token only in that trusted
+sidecar. The user container would not receive the token. If the sidecar,
+projection, or isolation is missing or malformed, the assignment does not
+become ready and mediated egress is denied.
+
 ## Security model
 
 - Capability bundle specs and assignment specs are immutable.
 - Approvals are exact overlays, not mutations of a live capability bundle.
 - Authorization uses an audience-restricted token bound to the current Pod UID.
-  The live POC uses an explicit external-mediator mode; projected-sidecar mode
-  remains the fail-closed default for a production egress data plane.
 - Authorization fails closed on stale caches, ambiguous state, malformed targets, expired grants, or incarnation mismatch.
 - Audit events omit headers, query strings, bodies, credentials, tokens, and source IPs.
 - The asynchronous audit queue cannot turn a valid allow into a deny.
