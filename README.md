@@ -19,9 +19,9 @@ It extends the public [AKS Kata example](https://github.com/opensandbox-group/Op
 [Open the visual live-demo report](docs/live-demo-report.md), including the
 architecture, exact redacted commands, terminal transcripts, and replay steps.
 
-| Running Kata sandbox | Administrator-controlled template |
+| Running Kata sandbox | Administrator capability editor |
 |---|---|
-| ![Running governed sandbox](docs/assets/requester-dashboard.png) | ![Administrator sandbox template](docs/assets/admin-templates.png) |
+| ![Running governed sandbox](docs/assets/requester-dashboard.png) | ![Administrator capability editor](docs/assets/admin-capabilities.png) |
 
 ## Prerequisites
 
@@ -164,10 +164,22 @@ Open:
 - Access requests: <http://127.0.0.1:18081/dashboard/access>
 - Administration: <http://127.0.0.1:18082/dashboard/admin>
 
-The administrator page can create immutable `SandboxTemplate` revisions. Each
-template selects a digest-pinned image, entrypoint, CPU/memory limit, lifetime,
-and exact capability-bundle policy revision. Harnesses can only select enabled
-templates.
+The administrator page can create immutable `CapabilityBundle` boundaries from
+exact egress entries such as `external-web GET https://example.com/docs`, then
+create immutable `SandboxTemplate` revisions by selecting one of those
+boundaries. Each template also selects a digest-pinned image, entrypoint,
+CPU/memory limit, lifetime, and exact capability-bundle policy revision.
+Harnesses can only select enabled templates.
+
+Admin-entered egress rules reject explicit ports, query strings, and fragments
+instead of silently widening a grant. Admin-entered commands are exact strings;
+the dashboard generates the anchored policy representation automatically.
+
+The page is a convenience frontend, not a second configuration store. Every
+boundary and template created there is stored as a Kubernetes
+`CapabilityBundle` or `SandboxTemplate` custom resource. Platform teams can
+define the same resources directly with YAML and manage them through GitOps,
+Helm, Kustomize, or another Kubernetes-native workflow.
 
 Create a sandbox from the requester page and wait for its assignment to become ready:
 
@@ -214,7 +226,9 @@ Changing the backend, method, host, path, assignment UID, or bundle revision doe
 
 - Capability bundle specs and assignment specs are immutable.
 - Approvals are exact overlays, not mutations of a live capability bundle.
-- Projected sandbox identity is audience-restricted and bound to the current Pod UID.
+- Authorization uses an audience-restricted token bound to the current Pod UID.
+  The live POC uses an explicit external-mediator mode; projected-sidecar mode
+  remains the fail-closed default for a production egress data plane.
 - Authorization fails closed on stale caches, ambiguous state, malformed targets, expired grants, or incarnation mismatch.
 - Audit events omit headers, query strings, bodies, credentials, tokens, and source IPs.
 - The asynchronous audit queue cannot turn a valid allow into a deny.

@@ -138,6 +138,7 @@ spec:
             - {name: ASSIGNMENTD_HEALTH_ADDRESS, value: "0.0.0.0:8081"}
             - {name: ASSIGNMENTD_NAMESPACE, value: aks-sandbox-system}
             - {name: ASSIGNMENTD_WORKLOAD_NAMESPACE, value: opensandbox}
+            - {name: ASSIGNMENTD_EGRESS_IDENTITY_MODE, value: external-mediator}
             - {name: ASSIGNMENTD_OPENSANDBOX_URL, value: "http://opensandbox-server.opensandbox.svc.cluster.local:8080"}
             - {name: ASSIGNMENTD_EGRESS_EVENT_RETENTION, value: 24h}
             - {name: ASSIGNMENTD_AUDIT_QUEUE_SIZE, value: "1024"}

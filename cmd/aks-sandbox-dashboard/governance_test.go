@@ -36,6 +36,10 @@ func TestGovernanceRoutesRequireAdminRole(t *testing.T) {
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("admin response = %d", response.Code)
 	}
+	response = serveGovernance(handler, http.MethodPost, "/admin/bundles", url.Values{"csrf": {"csrf"}}, user, "csrf")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("admin bundle response = %d", response.Code)
+	}
 	response = serveGovernance(handler, http.MethodGet, "/access", nil, user, "csrf")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Sandbox access requests") {
 		t.Fatalf("access response = %d body=%s", response.Code, response.Body.String())
@@ -157,6 +161,69 @@ func TestGovernanceAdminCreatesImmutableSandboxTemplate(t *testing.T) {
 	if image != "python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ||
 		bundle != "coding" || !strings.HasPrefix(revision, "sha256:") || timeout != 1800 {
 		t.Fatalf("created template = %#v", object.Object["spec"])
+	}
+}
+
+func TestGovernanceAdminCreatesCapabilityBundleFromExactRules(t *testing.T) {
+	governanceDashboard, handler := newGovernanceTestHandler(t, governanceFixtureObjects(t)...)
+	admin := authenticatedIdentity{TenantID: testTenantID, ObjectID: testAdminID, Name: "Administrator", Roles: []string{"OpenSandbox.Admin"}}
+	form := url.Values{
+		"csrf": {"csrf"}, "name": {"web-reader-v1"}, "displayName": {"Approved web reader"},
+		"logicalTenant": {"tenant-a"}, "team": {"readers"}, "permissionLevel": {"reader"},
+		"egressRules":     {"external-web GET https://example.com/docs\nexternal-web GET https://example.com/reference"},
+		"allowedCommands": {`uname -a && python --version`},
+	}
+	response := serveGovernance(handler, http.MethodPost, "/admin/bundles", form, admin, "csrf")
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("create bundle response = %d body=%s", response.Code, response.Body.String())
+	}
+	object, err := governanceDashboard.client.Resource(dashboardBundlesGVR).Namespace("aks-sandbox-system").Get(
+		context.Background(), "web-reader-v1", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := &assignmentv1alpha1.CapabilityBundle{}
+	if err := fromUnstructured(object, bundle); err != nil {
+		t.Fatal(err)
+	}
+	policy := bundle.Spec.Egress.Agentgateway["external-web"].Allow
+	if !strings.Contains(policy, `request.host == "example.com"`) ||
+		!strings.Contains(policy, `request.path == "/docs"`) ||
+		!strings.Contains(policy, `request.path == "/reference"`) ||
+		len(bundle.Spec.Harness.CommandPolicy) != 1 ||
+		bundle.Spec.Harness.CommandPolicy[0].Pattern != `^uname -a && python --version$` ||
+		bundle.Spec.Governance.DisplayName != "Approved web reader" {
+		t.Fatalf("created bundle = %+v", bundle.Spec)
+	}
+}
+
+func TestGovernanceCapabilityBundleRejectsNonExactURL(t *testing.T) {
+	_, handler := newGovernanceTestHandler(t, governanceFixtureObjects(t)...)
+	admin := authenticatedIdentity{TenantID: testTenantID, ObjectID: testAdminID, Name: "Administrator", Roles: []string{"OpenSandbox.Admin"}}
+	form := url.Values{
+		"csrf": {"csrf"}, "name": {"web-reader-v1"}, "displayName": {"Approved web reader"},
+		"logicalTenant": {"tenant-a"}, "team": {"readers"}, "permissionLevel": {"reader"},
+		"egressRules": {"external-web GET https://example.com/docs?token=not-allowed"},
+	}
+
+	response := serveGovernance(handler, http.MethodPost, "/admin/bundles", form, admin, "csrf")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("create bundle response = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestGovernanceCapabilityBundleRejectsExplicitPort(t *testing.T) {
+	_, handler := newGovernanceTestHandler(t, governanceFixtureObjects(t)...)
+	admin := authenticatedIdentity{TenantID: testTenantID, ObjectID: testAdminID, Name: "Administrator", Roles: []string{"OpenSandbox.Admin"}}
+	form := url.Values{
+		"csrf": {"csrf"}, "name": {"web-reader-v1"}, "displayName": {"Approved web reader"},
+		"logicalTenant": {"tenant-a"}, "team": {"readers"}, "permissionLevel": {"reader"},
+		"egressRules": {"external-web GET https://example.com:8443/docs"},
+	}
+	response := serveGovernance(handler, http.MethodPost, "/admin/bundles", form, admin, "csrf")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("create bundle response = %d body=%s", response.Code, response.Body.String())
 	}
 }
 

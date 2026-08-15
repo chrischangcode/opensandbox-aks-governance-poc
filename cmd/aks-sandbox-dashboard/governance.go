@@ -52,7 +52,7 @@ type assignmentPageRow struct {
 }
 
 type bundlePageRow struct {
-	Name, UID, Boundary, LogicalTenant, Team, Permission string
+	Name, UID, Boundary, LogicalTenant, Team, Permission, Egress, Commands string
 }
 
 type eventPageRow struct {
@@ -109,6 +109,7 @@ func (g *governanceDashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /access", g.accessPage)
 	mux.HandleFunc("POST /access/requests", g.createAccessRequest)
 	mux.HandleFunc("GET /admin", g.adminPage)
+	mux.HandleFunc("POST /admin/bundles", g.createCapabilityBundle)
 	mux.HandleFunc("POST /admin/templates", g.createSandboxTemplate)
 	mux.HandleFunc("POST /admin/requests/{name}/approve", g.approveAccessRequest)
 	mux.HandleFunc("POST /admin/requests/{name}/deny", g.denyAccessRequest)
@@ -622,6 +623,17 @@ func (g *governanceDashboard) bundleRows(ctx context.Context) ([]bundlePageRow, 
 			row.Team = bundle.Spec.Governance.Team
 			row.Permission = bundle.Spec.Governance.PermissionLevel
 		}
+		if bundle.Spec.Egress != nil {
+			backends := make([]string, 0, len(bundle.Spec.Egress.Agentgateway))
+			for backend, policy := range bundle.Spec.Egress.Agentgateway {
+				backends = append(backends, backend+": "+policy.Allow)
+			}
+			slices.Sort(backends)
+			row.Egress = strings.Join(backends, "; ")
+		}
+		if bundle.Spec.Harness != nil {
+			row.Commands = strconv.Itoa(len(bundle.Spec.Harness.CommandPolicy)) + " allowed pattern(s)"
+		}
 		rows = append(rows, row)
 	}
 	slices.SortFunc(rows, func(a, b bundlePageRow) int { return strings.Compare(a.Name, b.Name) })
@@ -842,6 +854,19 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 <title>Sandbox governance admin</title><style>` + governanceStyles + `</style></head><body>
 <nav><a href="{{.BasePath}}/">Sandbox dashboard</a><a href="{{.BasePath}}/access">Access</a><a href="{{.BasePath}}/admin">Admin</a><span>{{.IdentityName}}</span></nav>
 <main><h1>Sandbox governance admin <small>POC</small></h1>{{if .Message}}<p class="message">{{.Message}}</p>{{end}}
+<section id="capability-boundaries"><h2>Capability boundaries</h2><table><thead><tr><th>Bundle</th><th>Boundary</th><th>Logical tenant / team</th><th>Permission</th><th>Pre-authorized capabilities</th></tr></thead><tbody>
+{{range .Bundles}}<tr><td>{{.Name}}</td><td>{{.Boundary}}</td><td>{{.LogicalTenant}} / {{.Team}}</td><td>{{.Permission}}</td><td>{{if .Egress}}<code>{{.Egress}}</code>{{else}}No external egress{{end}}<br>{{if .Commands}}{{.Commands}}{{else}}No harness commands{{end}}</td></tr>{{else}}<tr><td colspan="5">No bundles found.</td></tr>{{end}}</tbody></table>
+<h3 id="create-capability-boundary">Create immutable capability boundary</h3>
+<p>Use one exact HTTPS rule per line: <code>backend METHOD https://host/path</code>. No CEL is required.</p>
+<form method="post" action="{{.BasePath}}/admin/bundles"><input type="hidden" name="csrf" value="{{.CSRFToken}}">
+<label>Name<input name="name" maxlength="63" pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?" required></label>
+<label>Display name<input name="displayName" maxlength="128" required></label>
+<label>Logical tenant<input name="logicalTenant" maxlength="63" value="tenant-a" required></label>
+<label>Team<input name="team" maxlength="63" value="readers" required></label>
+<label>Permission level<input name="permissionLevel" maxlength="63" value="reader" required></label>
+<label>Pre-authorized external egress<textarea name="egressRules" maxlength="8192" placeholder="external-web GET https://example.com/docs"></textarea></label>
+<label>Allowed exact commands<textarea name="allowedCommands" maxlength="8192" placeholder="uname -a &amp;&amp; python --version"></textarea></label>
+<button type="submit">Create capability boundary</button></form></section>
 <section id="approved-templates"><h2>Approved sandbox templates</h2><table><thead><tr><th>Template</th><th>Runtime</th><th>Capability boundary</th><th>Limits</th><th>Enabled</th></tr></thead><tbody>
 {{range .Templates}}<tr><td><code>{{.Name}}</code><br>{{.DisplayName}}<br>{{.Description}}</td><td>{{.Image}}<br><code>{{.Entrypoint}}</code></td><td>{{.CapabilityBundle}}</td><td>{{.CPU}} / {{.Memory}}<br>{{.Timeout}}</td><td>{{.Enabled}}</td></tr>{{else}}<tr><td colspan="5">No sandbox templates found.</td></tr>{{end}}
 </tbody></table>
@@ -852,7 +877,7 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 <label>Description<textarea name="description" maxlength="512"></textarea></label>
 <label>Digest-pinned image<input name="image" maxlength="512" value="python@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4" required></label>
 <label>Entrypoint JSON<input name="entrypoint" maxlength="2048" value='["tail","-f","/dev/null"]' required></label>
-<label>Capability bundle<input name="capabilityBundle" maxlength="253" value="team-a-harness-reader-v1" required></label>
+<label>Capability bundle<select name="capabilityBundle" required>{{range .Bundles}}<option value="{{.Name}}">{{.Name}} - {{.Boundary}}</option>{{end}}</select></label>
 <label>CPU<input name="cpu" maxlength="32" value="500m" required></label>
 <label>Memory<input name="memory" maxlength="32" value="512Mi" required></label>
 <label>Lifetime seconds<input name="timeoutSeconds" type="number" min="60" max="3600" value="1800" required></label>
@@ -863,8 +888,6 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 {{if eq .State "Pending"}}<form method="post" action="{{.ApproveAction}}"><input type="hidden" name="csrf" value="{{$.CSRFToken}}"><label>Decision reason<textarea name="decisionReason" maxlength="512" required></textarea></label><label>Duration (minutes)<input name="durationMinutes" type="number" min="1" max="{{.RequestedMinutes}}" value="{{.RequestedMinutes}}" required></label><button type="submit">Approve</button></form>
 <form method="post" action="{{.DenyAction}}"><input type="hidden" name="csrf" value="{{$.CSRFToken}}"><label>Decision reason<textarea name="decisionReason" maxlength="512" required></textarea></label><button class="deny" type="submit">Deny</button></form>
 {{else}}{{.Approver}}<br>{{.DecisionReason}}<br>{{.ApprovedAt}} {{.ExpiresAt}}{{end}}</td></tr>{{else}}<tr><td colspan="4">No access requests found.</td></tr>{{end}}</tbody></table></section>
-<section><h2>Capability boundaries</h2><table><thead><tr><th>Bundle</th><th>Boundary</th><th>Logical tenant / team</th><th>Permission</th></tr></thead><tbody>
-{{range .Bundles}}<tr><td>{{.Name}}</td><td>{{.Boundary}}</td><td>{{.LogicalTenant}} / {{.Team}}</td><td>{{.Permission}}</td></tr>{{else}}<tr><td colspan="4">No bundles found.</td></tr>{{end}}</tbody></table></section>
 <section><h2>Current assignments</h2><table><thead><tr><th>Assignment / sandbox</th><th>Bundle</th><th>Boundary</th><th>Permission</th><th>Ready</th></tr></thead><tbody>
 {{range .Assignments}}<tr><td>{{.Name}}<br>{{.SandboxID}}</td><td>{{.Bundle}}</td><td>{{.Boundary}}</td><td>{{.Permission}}</td><td>{{.Ready}}</td></tr>{{else}}<tr><td colspan="5">No assignments found.</td></tr>{{end}}</tbody></table></section>
 <section id="recent-egress-events"><h2>Recent egress events</h2><table><thead><tr><th>Time / sandbox</th><th>Target</th><th>Decision</th><th>Reason</th></tr></thead><tbody>

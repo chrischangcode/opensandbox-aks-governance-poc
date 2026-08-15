@@ -90,6 +90,13 @@ func run(logger *slog.Logger, opts options) error {
 	healthAddress := envOr("ASSIGNMENTD_HEALTH_ADDRESS", defaultHealthAddress)
 	assignmentNamespace := envOr("ASSIGNMENTD_NAMESPACE", defaultAssignmentNamespace)
 	workloadNamespace := envOr("ASSIGNMENTD_WORKLOAD_NAMESPACE", defaultWorkloadNamespace)
+	egressIdentityMode := assignmentcontroller.EgressIdentityMode(
+		envOr("ASSIGNMENTD_EGRESS_IDENTITY_MODE", string(assignmentcontroller.ProjectedSidecarIdentity)),
+	)
+	if egressIdentityMode != assignmentcontroller.ProjectedSidecarIdentity &&
+		egressIdentityMode != assignmentcontroller.ExternalMediatorIdentity {
+		return fmt.Errorf("invalid ASSIGNMENTD_EGRESS_IDENTITY_MODE")
+	}
 	openSandboxURL, err := url.Parse(envOr("ASSIGNMENTD_OPENSANDBOX_URL", defaultOpenSandboxURL))
 	if err != nil || openSandboxURL.Scheme == "" || openSandboxURL.Host == "" {
 		return fmt.Errorf("invalid ASSIGNMENTD_OPENSANDBOX_URL")
@@ -115,6 +122,7 @@ func run(logger *slog.Logger, opts options) error {
 	assignmentController := assignmentcontroller.New(dynamicClient, coreClient, assignmentcontroller.Config{
 		AssignmentNamespace: assignmentNamespace,
 		WorkloadNamespace:   workloadNamespace,
+		EgressIdentityMode:  egressIdentityMode,
 		Interval:            time.Second,
 	}, logger)
 

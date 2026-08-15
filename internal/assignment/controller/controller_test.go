@@ -38,6 +38,30 @@ func TestValidateIdentity(t *testing.T) {
 	}
 }
 
+func TestValidateExternalMediatorIdentity(t *testing.T) {
+	automount := false
+	pod := &corev1.Pod{Spec: corev1.PodSpec{AutomountServiceAccountToken: &automount}}
+	if err := validateExternalMediatorIdentity(pod); err != nil {
+		t.Fatalf("validateExternalMediatorIdentity() error = %v", err)
+	}
+	automount = true
+	if err := validatePodServiceAccountIsolation(pod); err == nil {
+		t.Fatal("automounted service account token was accepted")
+	}
+	automount = false
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name: "unexpected-token",
+		VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+				Audience: "other", Path: "token",
+			}}},
+		}},
+	}}
+	if err := validateExternalMediatorIdentity(pod); err == nil {
+		t.Fatal("projected service account token was accepted")
+	}
+}
+
 func TestValidateBundlePolicy(t *testing.T) {
 	valid := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"egress": map[string]any{"agentgateway": map[string]any{
 		"goproxy": map[string]any{"allow": `request.method == "GET"`},
@@ -128,12 +152,16 @@ func TestAssignmentUIDPrefersOpenSandboxAnnotation(t *testing.T) {
 
 func TestReadyConditionsDescribeIdentityRequirement(t *testing.T) {
 	object := &unstructured.Unstructured{}
-	withoutIdentity := readyConditions(object, false)
-	withIdentity := readyConditions(object, true)
+	withoutIdentity := readyConditions(object, false, ProjectedSidecarIdentity)
+	withIdentity := readyConditions(object, true, ProjectedSidecarIdentity)
+	withExternalMediator := readyConditions(object, true, ExternalMediatorIdentity)
 	without := withoutIdentity[2].(map[string]any)
 	with := withIdentity[2].(map[string]any)
-	if without["reason"] != "IdentityNotRequired" || with["reason"] != "EgressIdentityConfigured" {
-		t.Fatalf("identity conditions without=%#v with=%#v", without, with)
+	external := withExternalMediator[2].(map[string]any)
+	if without["reason"] != "IdentityNotRequired" ||
+		with["reason"] != "EgressIdentityConfigured" ||
+		external["reason"] != "ExternalMediatorConfigured" {
+		t.Fatalf("identity conditions without=%#v with=%#v external=%#v", without, with, external)
 	}
 }
 

@@ -79,7 +79,7 @@ type HarnessPolicy struct {
 	CommandPolicy []CommandPolicyRule `json:"commandPolicy,omitempty"`
 }
 
-// CommandPolicyRule classifies a canonical command string.
+// CommandPolicyRule classifies one anchored exact-literal command string.
 type CommandPolicyRule struct {
 	Pattern  string `json:"pattern"`
 	Decision string `json:"decision"`

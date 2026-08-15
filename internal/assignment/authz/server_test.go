@@ -114,14 +114,17 @@ func TestGRPCCheckRoundTrip(t *testing.T) {
 
 func TestHostname(t *testing.T) {
 	for input, want := range map[string]string{
-		"example.test":       "example.test",
-		"example.test:8443":  "example.test",
-		"[2001:db8::1]:8443": "2001:db8::1",
-		"[2001:db8::1]":      "2001:db8::1",
+		"example.test":  "example.test",
+		"[2001:db8::1]": "2001:db8::1",
 	} {
 		got, err := governance.NormalizeHost(input)
 		if err != nil || got != want {
 			t.Errorf("NormalizeHost(%q) = %q, %v, want %q", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"example.test:8443", "[2001:db8::1]:8443"} {
+		if _, err := governance.NormalizeHost(input); err == nil {
+			t.Errorf("NormalizeHost(%q) accepted an explicit port", input)
 		}
 	}
 }
@@ -131,6 +134,7 @@ func TestCheckRejectsMalformedRequestsBeforeChecker(t *testing.T) {
 		"nil":              nil,
 		"missing backend":  checkRequestWithoutBackend(),
 		"missing identity": checkRequestWithoutIdentity(),
+		"explicit port":    checkRequestWithExplicitPort(),
 		"missing HTTP": {
 			Attributes: &authv3.AttributeContext{
 				ContextExtensions: map[string]string{BackendContextKey: "goproxy"},
@@ -203,7 +207,7 @@ func checkRequest() *authv3.CheckRequest {
 			Request: &authv3.AttributeContext_Request{
 				Http: &authv3.AttributeContext_HttpRequest{
 					Method: "GET",
-					Host:   "example.test:8443",
+					Host:   "example.test",
 					Path:   "/repos?q=test",
 					Headers: map[string]string{
 						IdentityHeader: "sensitive-token",
@@ -225,5 +229,11 @@ func checkRequestWithoutBackend() *authv3.CheckRequest {
 func checkRequestWithoutIdentity() *authv3.CheckRequest {
 	r := checkRequest()
 	delete(r.Attributes.Request.Http.Headers, IdentityHeader)
+	return r
+}
+
+func checkRequestWithExplicitPort() *authv3.CheckRequest {
+	r := checkRequest()
+	r.Attributes.Request.Http.Host = "example.test:8443"
 	return r
 }

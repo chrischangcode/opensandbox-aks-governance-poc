@@ -9,14 +9,14 @@ import (
 )
 
 func TestNormalizeTarget(t *testing.T) {
-	target, err := NormalizeTarget("cachew", "get", "Example.COM:8443", "/repo/info/refs?service=git-upload-pack")
+	target, err := NormalizeTarget("cachew", "get", "Example.COM", "/repo/info/refs?service=git-upload-pack")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if target.Method != "GET" || target.Host != "example.com" || target.Path != "/repo/info/refs" {
 		t.Fatalf("target = %#v", target)
 	}
-	for _, host := range []string{"https://example.com", "example.com:bad", "bad host"} {
+	for _, host := range []string{"https://example.com", "example.com:8443", "example.com:bad", "bad host"} {
 		if _, err := NormalizeHost(host); err == nil {
 			t.Fatalf("NormalizeHost(%q) succeeded", host)
 		}

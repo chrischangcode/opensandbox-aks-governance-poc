@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -87,8 +86,32 @@ def load_template(name: str) -> dict[str, Any]:
 
 
 def policy_revision(spec: dict[str, Any]) -> str:
-    body = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
+    body = json.dumps(
+        spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
     return f"sha256:{hashlib.sha256(body).hexdigest()}"
+
+
+def exact_command(pattern: str) -> str | None:
+    if len(pattern) < 2 or not pattern.startswith("^") or not pattern.endswith("$"):
+        return None
+    literal: list[str] = []
+    body = pattern[1:-1]
+    metacharacters = frozenset(r"\.^$*+?{}[]|()")
+    index = 0
+    while index < len(body):
+        character = body[index]
+        if character == "\\":
+            index += 1
+            if index >= len(body) or body[index] not in metacharacters:
+                return None
+            literal.append(body[index])
+        elif character in metacharacters:
+            return None
+        else:
+            literal.append(character)
+        index += 1
+    return "".join(literal)
 
 
 def enforce_command_policy(bundle: dict[str, Any], command: str) -> None:
@@ -96,13 +119,13 @@ def enforce_command_policy(bundle: dict[str, Any], command: str) -> None:
     if command == "":
         if not rules:
             raise PermissionError("capability bundle has no harness command policy")
+        if any(exact_command(rule["pattern"]) is None for rule in rules):
+            raise ValueError("capability bundle contains a non-exact command pattern")
         return
+    if len(command) > 2048 or any(character in command for character in "\r\n\x00"):
+        raise PermissionError("command exceeds the bounded exact-command policy")
     for rule in rules:
-        try:
-            matches = re.fullmatch(rule["pattern"], command) is not None
-        except re.error as error:
-            raise ValueError("capability bundle contains an invalid command pattern") from error
-        if not matches:
+        if exact_command(rule["pattern"]) != command:
             continue
         reason = rule.get("reason") or "no reason supplied"
         if rule["decision"] == "allow":

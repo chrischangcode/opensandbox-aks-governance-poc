@@ -16,3 +16,22 @@ spec:
     memory: 512Mi
   timeoutSeconds: 1800
   enabled: true
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: python-kata-web-reader-v1
+  namespace: aks-sandbox-system
+spec:
+  displayName: Python Kata approved web reader
+  description: Ephemeral Python sandbox with exact GET access to example.com/docs.
+  image: python@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4
+  entrypoint: [tail, -f, /dev/null]
+  capabilityBundleRef:
+    name: team-a-web-reader-v1
+    policyRevision: sha256:3b44eb2efee0c1e2230303fbb38a5d00b5d554587ab0819df77360eddd7cd60d
+  resources:
+    cpu: 500m
+    memory: 512Mi
+  timeoutSeconds: 1800
+  enabled: true

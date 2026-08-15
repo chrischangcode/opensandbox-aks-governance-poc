@@ -3,8 +3,6 @@ package authz
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -640,10 +638,5 @@ func conditionTrue(object *unstructured.Unstructured, kind string) bool {
 
 func checkerPolicyRevision(bundle *unstructured.Unstructured) (string, error) {
 	spec, _, _ := unstructured.NestedMap(bundle.Object, "spec")
-	body, err := json.Marshal(spec)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(body)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	return governance.PolicyRevision(spec)
 }

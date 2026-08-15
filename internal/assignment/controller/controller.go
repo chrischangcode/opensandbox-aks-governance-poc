@@ -3,8 +3,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +14,7 @@ import (
 	assignmentv1alpha1 "github.com/chrischangcode/opensandbox-aks-governance-poc/api/assignment/v1alpha1"
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment"
 	assignmentauthz "github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/authz"
+	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/governance"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,6 +35,16 @@ const (
 	identityMountPath   = "/var/run/aks-sandbox-identity"
 )
 
+// EgressIdentityMode controls where the audience-restricted Pod identity is held.
+type EgressIdentityMode string
+
+const (
+	// ProjectedSidecarIdentity requires a projected token mounted only by an egress sidecar.
+	ProjectedSidecarIdentity EgressIdentityMode = "projected-sidecar"
+	// ExternalMediatorIdentity allows a trusted external mediator to request a Pod-bound token.
+	ExternalMediatorIdentity EgressIdentityMode = "external-mediator"
+)
+
 var (
 	assignmentsGVR = schema.GroupVersionResource{Group: "aks-sandbox.azure.com", Version: "v1alpha1", Resource: "sandboxassignments"}
 	bundlesGVR     = schema.GroupVersionResource{Group: "aks-sandbox.azure.com", Version: "v1alpha1", Resource: "capabilitybundles"}
@@ -48,6 +57,7 @@ type Config struct {
 	AssignmentNamespace   string
 	WorkloadNamespace     string
 	AllowedRuntimeClasses []string
+	EgressIdentityMode    EgressIdentityMode
 	Interval              time.Duration
 }
 
@@ -69,6 +79,13 @@ func New(dynamicClient dynamic.Interface, coreClient kubernetes.Interface, confi
 	}
 	if len(config.AllowedRuntimeClasses) == 0 {
 		config.AllowedRuntimeClasses = []string{"kata-vm-isolation", "kata-optimized", "self-kata-clh", "kata-clh"}
+	}
+	if config.EgressIdentityMode == "" {
+		config.EgressIdentityMode = ProjectedSidecarIdentity
+	}
+	if config.EgressIdentityMode != ProjectedSidecarIdentity &&
+		config.EgressIdentityMode != ExternalMediatorIdentity {
+		panic("assignment controller: invalid egress identity mode")
 	}
 	if config.Interval <= 0 {
 		config.Interval = 2 * time.Second
@@ -201,6 +218,9 @@ func (c *Controller) reconcile(ctx context.Context, object *unstructured.Unstruc
 	if err := validateEligibleServiceAccount(serviceAccount); err != nil {
 		return c.updateStatus(ctx, object, resolved, workloadReference(workload), podReference(pod), progressConditions(object, true, true, false, "ServiceAccountNotReady", err.Error()))
 	}
+	if err := validatePodServiceAccountIsolation(pod); err != nil {
+		return c.updateStatus(ctx, object, resolved, workloadReference(workload), podReference(pod), progressConditions(object, true, true, false, "ServiceAccountNotReady", err.Error()))
+	}
 	if fencedUID := object.GetAnnotations()[assignment.ResumeAfterPodUIDAnnotation]; fencedUID != "" && fencedUID == string(pod.UID) {
 		return c.updateStatus(ctx, object, resolved, workloadReference(workload), podReference(pod), progressConditions(object, true, false, false, "ResumePending", "waiting for a fresh Pod incarnation"))
 	}
@@ -214,11 +234,18 @@ func (c *Controller) reconcile(ctx context.Context, object *unstructured.Unstruc
 		return c.updateStatus(ctx, object, resolved, workloadReference(workload), podReference(pod), progressConditions(object, true, true, false, "PodNotReady", "bound Pod is not ready"))
 	}
 	if identityRequired {
-		if err := validateIdentity(pod); err != nil {
+		var err error
+		switch c.config.EgressIdentityMode {
+		case ExternalMediatorIdentity:
+			err = validateExternalMediatorIdentity(pod)
+		default:
+			err = validateIdentity(pod)
+		}
+		if err != nil {
 			return c.updateStatus(ctx, object, resolved, workloadReference(workload), podReference(pod), progressConditions(object, true, true, false, "IdentityNotReady", err.Error()))
 		}
 	}
-	return c.updateStatus(ctx, object, resolved, workloadReference(workload), podReference(pod), readyConditions(object, identityRequired))
+	return c.updateStatus(ctx, object, resolved, workloadReference(workload), podReference(pod), readyConditions(object, identityRequired, c.config.EgressIdentityMode))
 }
 
 func (c *Controller) matchingWorkloads(ctx context.Context, object *unstructured.Unstructured) ([]unstructured.Unstructured, error) {
@@ -469,12 +496,7 @@ func validateBundlePolicy(bundle *assignmentv1alpha1.CapabilityBundle) error {
 
 func policyRevision(bundle *unstructured.Unstructured) (string, error) {
 	spec, _, _ := unstructured.NestedMap(bundle.Object, "spec")
-	body, err := json.Marshal(spec)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(body)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	return governance.PolicyRevision(spec)
 }
 
 func workloadReference(workload *unstructured.Unstructured) map[string]any {
@@ -544,8 +566,8 @@ func podReady(pod *corev1.Pod) bool {
 }
 
 func validateIdentity(pod *corev1.Pod) error {
-	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
-		return errors.New("automountServiceAccountToken must be false")
+	if err := validatePodServiceAccountIsolation(pod); err != nil {
+		return err
 	}
 	foundProjection := false
 	for _, volume := range pod.Spec.Volumes {
@@ -580,10 +602,36 @@ func validateIdentity(pod *corev1.Pod) error {
 	return nil
 }
 
-func readyConditions(object *unstructured.Unstructured, identityRequired bool) []any {
+func validatePodServiceAccountIsolation(pod *corev1.Pod) error {
+	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
+		return errors.New("automountServiceAccountToken must be false")
+	}
+	return nil
+}
+
+func validateExternalMediatorIdentity(pod *corev1.Pod) error {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Projected == nil {
+			continue
+		}
+		for _, source := range volume.Projected.Sources {
+			if source.ServiceAccountToken != nil {
+				return errors.New("external mediator mode forbids projected service account tokens")
+			}
+		}
+	}
+	return nil
+}
+
+func readyConditions(object *unstructured.Unstructured, identityRequired bool, mode EgressIdentityMode) []any {
 	identityReason, identityMessage := "IdentityNotRequired", "bundle has no mediated egress policy"
 	if identityRequired {
-		identityReason, identityMessage = "EgressIdentityConfigured", "identity projection is isolated to egress"
+		switch mode {
+		case ExternalMediatorIdentity:
+			identityReason, identityMessage = "ExternalMediatorConfigured", "trusted mediator issues an audience-restricted token bound to the sandbox Pod"
+		default:
+			identityReason, identityMessage = "EgressIdentityConfigured", "identity projection is isolated to egress"
+		}
 	}
 	return []any{
 		condition(object, "BundleResolved", true, "BundleValid", "immutable bundle resolved"),

@@ -138,6 +138,8 @@ spec:
                             type: string
                             minLength: 1
                             maxLength: 4096
+                            description: Anchored exact-literal command pattern; non-exact regex policies fail closed.
+                            pattern: '^\^.*\$$'
                           decision:
                             type: string
                             enum: [allow, deny, require_approval]

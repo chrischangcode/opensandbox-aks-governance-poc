@@ -16,7 +16,7 @@ included below.
 |---|---|
 | Isolated execution | `kata-optimized` runtime and MSHV guest kernel |
 | No host fallback | OpenCode agent exposes only governance MCP tools |
-| Admin-controlled shapes | Immutable, digest-pinned sandbox templates |
+| Admin-controlled shapes | Immutable capability boundaries and digest-pinned sandbox templates |
 | Command boundary | Approved command runs; unapproved `id` is rejected before creation |
 | Per-sandbox network attribution | Deny and allow events carry sandbox, tenant, team, target, and decision source |
 | Exact elevation | Approval is fenced by assignment UID, policy revision, backend, method, host, path, and expiry |
@@ -38,10 +38,19 @@ requesting the displayed exact target.
 
 ![Requester access governance](assets/access-governance.png)
 
-### 3. The administrator defines approved sandbox shapes
+### 3. The administrator pre-encodes capabilities and sandbox shapes
 
-Templates pin the image digest, capability policy revision, resource limits,
-entrypoint, lifetime, and enabled state.
+The admin page converts simple exact entries such as
+`external-web GET https://example.com/docs` into the capability policy. No CEL
+authoring is required. Explicit ports, query strings, and fragments are
+rejected rather than normalized into a broader rule. Allowed commands are
+entered as exact strings rather than arbitrary regular expressions.
+
+![Administrator capability boundaries](assets/admin-capabilities.png)
+
+Templates then select the resulting boundary and pin the image digest,
+capability policy revision, resource limits, entrypoint, lifetime, and enabled
+state.
 
 ![Administrator sandbox templates](assets/admin-templates.png)
 
@@ -64,10 +73,10 @@ The admin view shows the initial deny and the subsequent
 ```mermaid
 flowchart LR
     User[LLM user] --> OpenCode[OpenCode sandbox-only agent]
-    Admin[Administrator] --> AdminUI[Admin templates and approvals]
+    Admin[Administrator] --> AdminUI[Admin capabilities, templates, and approvals]
     OpenCode --> MCP[Governance MCP]
     MCP --> Assignmentd[assignmentd lifecycle facade]
-    AdminUI --> CRDs[Immutable templates, bundles, access requests]
+    AdminUI --> CRDs[Kubernetes CRDs: templates, bundles, access requests]
     Assignmentd --> OpenSandbox[OpenSandbox]
     OpenSandbox --> Kata[Kata sandbox Pod]
     CRDs --> Assignmentd
@@ -87,6 +96,19 @@ terminal logs, then pauses with the pages open:
 
 Use `./scripts/live-demo.sh --no-pause` for an unattended run. Artifacts are
 written to `demo-output/<timestamp>/`.
+
+The replay creates its demonstration capability boundary and template through
+the admin HTTP workflow, verifies that the corresponding Kubernetes custom
+resources exist, and removes them during cleanup.
+
+## Kubernetes-native source of truth
+
+The admin page is intentionally a convenience layer over Kubernetes APIs.
+`CapabilityBundle` and `SandboxTemplate` CRDs are the declarative source of
+truth; the UI does not maintain a separate database or proprietary template
+format. All current and future template capabilities should remain expressible
+as versioned custom resources so operators can use YAML, GitOps, Helm,
+Kustomize, policy admission, and normal Kubernetes RBAC.
 
 ## Redaction conventions
 
@@ -231,10 +253,22 @@ The pages remained bound to loopback:
 - Access requests: <http://127.0.0.1:18081/dashboard/access>
 - Administrator: <http://127.0.0.1:18082/dashboard/admin>
 
-The administrator page displayed the enabled immutable template
-`python-kata-reader-v1`.
+The administrator page displayed the enabled immutable templates and the
+capability-boundary editor.
 
-## Administrator-approved template
+## Administrator-approved capability and template
+
+For the live replay, the administrator submitted this human-readable boundary
+through the page:
+
+```text
+external-web GET https://example.com/docs
+```
+
+The server normalized the method, host, and path, generated an exact policy,
+and created a Kubernetes `CapabilityBundle`. The administrator then selected
+that bundle while creating a digest-pinned `SandboxTemplate`. The same objects
+can be defined declaratively:
 
 The hardened template and capability bundle were applied with:
 
@@ -250,13 +284,39 @@ kubectl -n aks-sandbox-system get sandboxtemplates \
 Sanitized terminal output:
 
 ```text
-NAME                    CAPABILITY                 DIGEST-PINNED                                                                    ENABLED
-python-kata-reader-v1   team-a-harness-reader-v1   python@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4   true
+NAME                                  CAPABILITY                           DIGEST-PINNED                                                                    ENABLED
+python-kata-reader-v1                 team-a-harness-reader-v1             python@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4   true
+python-kata-web-reader-v1             team-a-web-reader-v1                 python@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4   true
+demo-python-web-reader-<timestamp>    demo-web-reader-<timestamp>          python@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4   true
 ```
 
-The template selects a digest-pinned Python image, the
-`team-a-harness-reader-v1` capability bundle, 500m CPU, 512Mi memory, a
-30-minute maximum lifetime, and Kata-backed execution.
+The admin-created template selects a digest-pinned Python image, 500m CPU,
+512Mi memory, a 30-minute maximum lifetime, Kata-backed execution, and exact
+`GET https://example.com/docs` access.
+
+## Template-authorized egress without an access request
+
+The replay created a sandbox from the admin-created template and ran:
+
+```bash
+go run ./cmd/egress-probe \
+  --assignment assignment-v7ssn \
+  --backend external-web \
+  --target https://example.com/docs
+```
+
+```text
+assignment: assignment-v7ssn
+sandbox:    74f9d6a9-81f9-49c1-bf4d-0d1bd31bc8a2
+target:     GET https://example.com/docs
+backend:    external-web
+allowed:    true
+```
+
+The persisted event had `decisionSource: bundle`, an empty access-request
+name, and the replay independently confirmed that the assignment had zero
+access requests. This is the no-interruption path for capabilities the
+administrator intentionally pre-encoded in the selected template.
 
 ## OpenCode sandbox-only execution
 
@@ -316,14 +376,14 @@ Sanitized terminal transcript:
 > sandbox-only · big-pickle
 
 ⚙ sandbox_governance_list_templates
-One template is approved. Now running the exact command in a fresh ephemeral sandbox.
+Three templates are approved. Selecting python-kata-reader-v1 for the exact command.
 
 ⚙ sandbox_governance_run_ephemeral
   {"template_name":"python-kata-reader-v1","command":"uname -a && python --version"}
 
 Template:          python-kata-reader-v1
-Sandbox ID:        d1f60723-cbdb-43f9-8e54-4f6166b03bb5
-Assignment:        assignment-nb9mr
+Sandbox ID:        a17417a0-d884-4dff-96a8-04f6c789ccd3
+Assignment:        assignment-pnrl9
 Capability bundle: team-a-harness-reader-v1
 Runtime class:     kata-optimized
 Node:              <kata-node>
@@ -334,7 +394,7 @@ Cleaned up:        true
 Command output:
 
 ```text
-Linux d1f60723-cbdb-43f9-8e54-4f6166b03bb5-0 6.6.137.mshv1-1.azl3 #1 SMP Tue May 19 17:02:13 UTC 2026 x86_64 GNU/Linux
+Linux a17417a0-d884-4dff-96a8-04f6c789ccd3-0 6.6.137.mshv1-1.azl3 #1 SMP Tue May 19 17:02:13 UTC 2026 x86_64 GNU/Linux
 Python 3.12.14
 ```
 
@@ -347,17 +407,17 @@ Cleanup was independently checked with:
 
 ```bash
 kubectl -n aks-sandbox-system get sandboxassignments \
-  -l aks-sandbox.azure.com/opensandbox-id=d1f60723-cbdb-43f9-8e54-4f6166b03bb5
+  -l aks-sandbox.azure.com/opensandbox-id=a17417a0-d884-4dff-96a8-04f6c789ccd3
 kubectl -n opensandbox get batchsandboxes \
-  d1f60723-cbdb-43f9-8e54-4f6166b03bb5
+  a17417a0-d884-4dff-96a8-04f6c789ccd3
 kubectl -n opensandbox get pod \
-  d1f60723-cbdb-43f9-8e54-4f6166b03bb5-0
+  a17417a0-d884-4dff-96a8-04f6c789ccd3-0
 ```
 
 ```text
 No resources found in aks-sandbox-system namespace.
-Error from server (NotFound): batchsandboxes.sandbox.opensandbox.io "d1f60723-cbdb-43f9-8e54-4f6166b03bb5" not found
-Error from server (NotFound): pods "d1f60723-cbdb-43f9-8e54-4f6166b03bb5-0" not found
+Error from server (NotFound): batchsandboxes.sandbox.opensandbox.io "a17417a0-d884-4dff-96a8-04f6c789ccd3" not found
+Error from server (NotFound): pods "a17417a0-d884-4dff-96a8-04f6c789ccd3-0" not found
 ```
 
 The command-boundary check used:
@@ -384,21 +444,22 @@ server-side, fail-closed command policy in the referenced capability bundle.
 
 ## Per-sandbox egress attribution and approval
 
-An authorization probe used a short-lived projected token bound to the live
-sandbox Pod and requested the exact target `GET https://example.com/docs`.
+An authorization probe acting as the trusted external mediator requested a
+short-lived, audience-restricted token bound to the live sandbox Pod, then
+requested the exact target `GET https://example.com/docs`.
 
 The exact initial probe was:
 
 ```bash
 go run ./cmd/egress-probe \
-  --assignment assignment-7pws5 \
+  --assignment assignment-v4whv \
   --backend external-web \
   --target https://example.com/docs
 ```
 
 ```text
-assignment: assignment-7pws5
-sandbox:    e4e563f8-fb94-4124-9eee-c598a2ccc0e6
+assignment: assignment-v4whv
+sandbox:    c3f0b4a8-380e-4ec6-9550-ad07a46116bf
 target:     GET https://example.com/docs
 backend:    external-web
 allowed:    false
@@ -433,7 +494,7 @@ Invoke-WebRequest -UseBasicParsing -WebSession $requester `
 
 ```text
 event=egress-j58tl
-request=access-w4wvh
+request=access-qbvkv
 state=Pending
 ```
 
@@ -464,7 +525,7 @@ Invoke-WebRequest -UseBasicParsing -WebSession $admin `
 ```
 
 ```text
-request=access-w4wvh
+request=access-qbvkv
 state=Approved
 approvedDuration=15m
 ```
@@ -476,14 +537,14 @@ The identical probe was run again:
 
 ```bash
 go run ./cmd/egress-probe \
-  --assignment assignment-7pws5 \
+  --assignment assignment-v4whv \
   --backend external-web \
   --target https://example.com/docs
 ```
 
 ```text
-assignment: assignment-7pws5
-sandbox:    e4e563f8-fb94-4124-9eee-c598a2ccc0e6
+assignment: assignment-v4whv
+sandbox:    c3f0b4a8-380e-4ec6-9550-ad07a46116bf
 target:     GET https://example.com/docs
 backend:    external-web
 allowed:    true
@@ -500,9 +561,10 @@ kubectl -n aks-sandbox-system get sandboxegressevents \
 Sanitized terminal output:
 
 ```text
-TIME                   SANDBOX                                TENANT     TEAM      TARGET        PATH    ALLOWED   SOURCE           REQUEST
-2026-08-15T22:00:16Z   e4e563f8-fb94-4124-9eee-c598a2ccc0e6   tenant-a   readers   example.com   /docs   false     deny             <none>
-2026-08-15T22:00:22Z   e4e563f8-fb94-4124-9eee-c598a2ccc0e6   tenant-a   readers   example.com   /docs   true      access-request   access-w4wvh
+TIME                   SANDBOX                                TENANT     TEAM          TARGET        PATH    ALLOWED   SOURCE           REQUEST
+2026-08-15T22:57:07Z   74f9d6a9-81f9-49c1-bf4d-0d1bd31bc8a2   tenant-a   web-readers   example.com   /docs   true      bundle           <none>
+2026-08-15T22:57:28Z   c3f0b4a8-380e-4ec6-9550-ad07a46116bf   tenant-a   readers       example.com   /docs   false     deny             <none>
+2026-08-15T22:57:35Z   c3f0b4a8-380e-4ec6-9550-ad07a46116bf   tenant-a   readers       example.com   /docs   true      access-request   access-qbvkv
 ```
 
 This proves that an egress decision can be attributed to one immutable sandbox
@@ -518,6 +580,7 @@ gofmt -w api cmd internal
 go test ./...
 go test -race ./...
 bash -n harness/run-mcp.sh
+uv run --project harness python -m unittest harness.test_server
 uv run --project harness python -m py_compile harness/server.py
 git diff --check
 ```
@@ -535,6 +598,7 @@ ok   .../internal/assignment/opensandboxapi
 ok   .../internal/assignment/store/kubernetes
 
 race tests: all listed packages passed
+harness policy tests: passed
 bash syntax: passed
 Python compilation: passed
 git diff check: passed
@@ -554,5 +618,9 @@ git diff check: passed
   backend, HTTP method, normalized host, normalized path, or expiration differs.
 - Audit events omit headers, queries, bodies, source IPs, credentials, and
   tokens.
+- The live POC explicitly uses `external-mediator` identity mode because the
+  upstream OpenSandbox create path replaces additional template containers.
+  `projected-sidecar` remains the fail-closed controller default for a
+  production egress data plane.
 - Logical tenants are demonstrated as governance boundaries; this POC does not
   claim physical Azure tenant isolation.

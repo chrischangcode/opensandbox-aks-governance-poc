@@ -54,3 +54,24 @@ spec:
       - pattern: '^uname -a && python --version$'
         decision: allow
         reason: Read-only runtime identity demonstration.
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: CapabilityBundle
+metadata:
+  name: team-a-web-reader-v1
+  namespace: aks-sandbox-system
+spec:
+  governance:
+    logicalTenant: tenant-a
+    team: readers
+    permissionLevel: reader
+    displayName: Team A approved web reader
+  egress:
+    agentgateway:
+      external-web:
+        allow: request.method == "GET" && request.host == "example.com" && request.path == "/docs"
+  harness:
+    commandPolicy:
+      - pattern: '^uname -a && python --version$'
+        decision: allow
+        reason: Read-only runtime identity demonstration.

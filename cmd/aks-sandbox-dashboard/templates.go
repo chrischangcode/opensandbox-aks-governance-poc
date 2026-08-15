@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/governance"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -164,10 +164,5 @@ func (g *governanceDashboard) createSandboxTemplate(w http.ResponseWriter, r *ht
 
 func templatePolicyRevision(bundle *unstructured.Unstructured) (string, error) {
 	spec, _, _ := unstructured.NestedMap(bundle.Object, "spec")
-	body, err := json.Marshal(spec)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(body)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	return governance.PolicyRevision(spec)
 }

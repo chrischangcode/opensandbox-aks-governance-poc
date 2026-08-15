@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -72,18 +71,14 @@ func NormalizeHost(authority string) (string, error) {
 	}
 
 	host := authority
-	if splitHost, port, err := net.SplitHostPort(authority); err == nil {
-		value, err := strconv.Atoi(port)
-		if err != nil || value < 1 || value > 65535 {
-			return "", errors.New("host port is invalid")
-		}
-		host = splitHost
+	if _, _, err := net.SplitHostPort(authority); err == nil {
+		return "", errors.New("explicit host ports are not supported")
 	} else {
 		switch {
 		case strings.HasPrefix(authority, "[") && strings.HasSuffix(authority, "]"):
 			host = strings.TrimSuffix(strings.TrimPrefix(authority, "["), "]")
-		case strings.Count(authority, ":") == 1:
-			return "", errors.New("host port is invalid")
+		case strings.Contains(authority, ":"):
+			return "", errors.New("host is invalid")
 		}
 	}
 
