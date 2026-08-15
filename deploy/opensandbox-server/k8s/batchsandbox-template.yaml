@@ -1,0 +1,29 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  generateName: opensandbox-
+spec:
+  replicas: 1
+  template:
+    spec:
+      runtimeClassName: kata-optimized
+      serviceAccountName: opensandbox-workload
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.azure.com/agentpool: __KATA_NODEPOOL_NAME__
+      tolerations:
+        - key: kata
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: sandbox-container
+          image: python:3.12-slim
+          command: ["tail", "-f", "/dev/null"]
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

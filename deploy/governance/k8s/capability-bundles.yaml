@@ -1,0 +1,39 @@
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: CapabilityBundle
+metadata:
+  name: team-a-reader
+  namespace: aks-sandbox-system
+spec:
+  governance:
+    logicalTenant: tenant-a
+    team: readers
+    permissionLevel: reader
+    displayName: Team A read-only sandbox
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: CapabilityBundle
+metadata:
+  name: team-a-contributor
+  namespace: aks-sandbox-system
+spec:
+  governance:
+    logicalTenant: tenant-a
+    team: contributors
+    permissionLevel: contributor
+    displayName: Team A contributor sandbox
+  egress:
+    agentgateway:
+      source-control:
+        allow: request.method == "GET" && request.host == "github.com"
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: CapabilityBundle
+metadata:
+  name: team-b-reader
+  namespace: aks-sandbox-system
+spec:
+  governance:
+    logicalTenant: tenant-b
+    team: readers
+    permissionLevel: reader
+    displayName: Team B read-only sandbox

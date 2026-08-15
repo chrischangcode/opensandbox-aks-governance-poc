@@ -1,0 +1,181 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aks-sandbox-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: assignmentd
+  namespace: aks-sandbox-system
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: assignmentd-tokenreview
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: assignmentd-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: assignmentd
+    namespace: aks-sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: assignmentd-tokenreview
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: assignmentd
+  namespace: aks-sandbox-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create, get, update, patch]
+  - apiGroups: [aks-sandbox.azure.com]
+    resources: [capabilitybundles]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [aks-sandbox.azure.com]
+    resources: [sandboxassignments]
+    verbs: [create, get, list, watch, delete, update, patch]
+  - apiGroups: [aks-sandbox.azure.com]
+    resources: [sandboxassignments/status]
+    verbs: [get, update, patch]
+  - apiGroups: [aks-sandbox.azure.com]
+    resources: [sandboxaccessrequests]
+    verbs: [get, list, watch]
+  - apiGroups: [aks-sandbox.azure.com]
+    resources: [sandboxaccessrequests/status]
+    verbs: [get, update, patch]
+  - apiGroups: [aks-sandbox.azure.com]
+    resources: [sandboxegressevents]
+    verbs: [create, get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: assignmentd
+  namespace: aks-sandbox-system
+subjects:
+  - kind: ServiceAccount
+    name: assignmentd
+    namespace: aks-sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: assignmentd
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: assignmentd-workloads
+  namespace: opensandbox
+rules:
+  - apiGroups: [sandbox.opensandbox.io]
+    resources: [batchsandboxes]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [sandbox.opensandbox.io]
+    resources: [pools]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods, serviceaccounts]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: assignmentd-workloads
+  namespace: opensandbox
+subjects:
+  - kind: ServiceAccount
+    name: assignmentd
+    namespace: aks-sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: assignmentd-workloads
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: assignmentd
+  namespace: aks-sandbox-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: assignmentd
+  template:
+    metadata:
+      labels:
+        app: assignmentd
+    spec:
+      serviceAccountName: assignmentd
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: assignmentd
+          image: ${ASSIGNMENTD_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args: [--leader-elect=true]
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - {name: ASSIGNMENTD_GRPC_ADDRESS, value: "0.0.0.0:9001"}
+            - {name: ASSIGNMENTD_API_ADDRESS, value: "0.0.0.0:8080"}
+            - {name: ASSIGNMENTD_HEALTH_ADDRESS, value: "0.0.0.0:8081"}
+            - {name: ASSIGNMENTD_NAMESPACE, value: aks-sandbox-system}
+            - {name: ASSIGNMENTD_WORKLOAD_NAMESPACE, value: opensandbox}
+            - {name: ASSIGNMENTD_OPENSANDBOX_URL, value: "http://opensandbox-server.opensandbox.svc.cluster.local"}
+            - {name: ASSIGNMENTD_EGRESS_EVENT_RETENTION, value: 24h}
+            - {name: ASSIGNMENTD_AUDIT_QUEUE_SIZE, value: "1024"}
+            - name: ASSIGNMENTD_OPENSANDBOX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: assignmentd-opensandbox-api
+                  key: api-key
+          ports:
+            - {name: grpc-authz, containerPort: 9001}
+            - {name: api, containerPort: 8080}
+            - {name: health, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /healthz, port: health}
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            initialDelaySeconds: 10
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 250m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: assignmentd
+  namespace: aks-sandbox-system
+spec:
+  selector:
+    app: assignmentd
+  ports:
+    - {name: grpc-authz, port: 9001, targetPort: grpc-authz}
+    - {name: lifecycle, port: 8080, targetPort: api}
+    - {name: health, port: 8081, targetPort: health}

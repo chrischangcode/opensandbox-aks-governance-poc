@@ -1,0 +1,437 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: capabilitybundles.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: capabilitybundles
+    singular: capabilitybundle
+    kind: CapabilityBundle
+    shortNames: [capbundle]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              properties:
+                egress:
+                  type: object
+                  properties:
+                    agentgateway:
+                      type: object
+                      maxProperties: 32
+                      additionalProperties:
+                        type: object
+                        required: [allow]
+                        properties:
+                          allow:
+                            type: string
+                            minLength: 1
+                            maxLength: 4096
+                harness:
+                  type: object
+                  properties:
+                    commandPolicy:
+                      type: array
+                      maxItems: 128
+                      items:
+                        type: object
+                        required: [pattern, decision]
+                        properties:
+                          pattern:
+                            type: string
+                            minLength: 1
+                            maxLength: 4096
+                          decision:
+                            type: string
+                            enum: [allow, deny, require_approval]
+                          reason:
+                            type: string
+                            maxLength: 512
+                governance:
+                  type: object
+                  properties:
+                    logicalTenant:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                    team:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                    permissionLevel:
+                      type: string
+                      minLength: 1
+                      maxLength: 64
+                    displayName:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: CapabilityBundle.spec is immutable
+      additionalPrinterColumns:
+        - name: Boundary
+          type: string
+          jsonPath: .spec.governance.displayName
+        - name: Permission
+          type: string
+          jsonPath: .spec.governance.permissionLevel
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxassignments.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: sandboxassignments
+    singular: sandboxassignment
+    kind: SandboxAssignment
+    shortNames: [sbassignment]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [capabilityBundleRef]
+              properties:
+                capabilityBundleRef:
+                  type: object
+                  required: [name]
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: SandboxAssignment.spec is immutable
+            status:
+              type: object
+              properties:
+                workloadRef:
+                  x-kubernetes-preserve-unknown-fields: true
+                  type: object
+                podRef:
+                  x-kubernetes-preserve-unknown-fields: true
+                  type: object
+                resolvedCapabilityBundle:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    uid: { type: string }
+                    policyRevision: { type: string }
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type: { type: string }
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      observedGeneration: { type: integer, format: int64 }
+                      lastTransitionTime: { type: string, format: date-time }
+                      reason: { type: string }
+                      message: { type: string }
+      additionalPrinterColumns:
+        - name: Bundle
+          type: string
+          jsonPath: .spec.capabilityBundleRef.name
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: Pod
+          type: string
+          jsonPath: .status.podRef.name
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxaccessrequests.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: sandboxaccessrequests
+    singular: sandboxaccessrequest
+    kind: SandboxAccessRequest
+    shortNames: [sbaccess]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required:
+                - assignmentRef
+                - basePolicyRevision
+                - backend
+                - method
+                - host
+                - path
+                - reason
+                - requester
+                - requestedDurationSeconds
+              properties:
+                assignmentRef:
+                  type: object
+                  required: [name, uid]
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                      maxLength: 253
+                    uid:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                basePolicyRevision:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                backend:
+                  type: string
+                  pattern: '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+                method:
+                  type: string
+                  pattern: '^[A-Z][A-Z0-9_-]{0,31}$'
+                host:
+                  type: string
+                  minLength: 1
+                  maxLength: 253
+                path:
+                  type: string
+                  minLength: 1
+                  maxLength: 2048
+                  pattern: '^/'
+                reason:
+                  type: string
+                  minLength: 3
+                  maxLength: 512
+                requester:
+                  type: object
+                  required: [tenantId, objectId, displayName]
+                  properties:
+                    tenantId:
+                      type: string
+                      format: uuid
+                    objectId:
+                      type: string
+                      format: uuid
+                    displayName:
+                      type: string
+                      minLength: 1
+                      maxLength: 256
+                    logicalTenant:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                    team:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                requestedDurationSeconds:
+                  type: integer
+                  format: int32
+                  minimum: 60
+                  maximum: 28800
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: SandboxAccessRequest.spec is immutable
+                - rule: '!self.path.contains("?") && !self.path.contains("#")'
+                  message: path must not contain a query string or fragment
+            status:
+              type: object
+              properties:
+                state:
+                  type: string
+                  enum: [Pending, Approved, Denied, Expired]
+                  default: Pending
+                approver:
+                  type: object
+                  required: [tenantId, objectId, displayName]
+                  properties:
+                    tenantId:
+                      type: string
+                      format: uuid
+                    objectId:
+                      type: string
+                      format: uuid
+                    displayName:
+                      type: string
+                      minLength: 1
+                      maxLength: 256
+                    logicalTenant:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                    team:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                decisionReason:
+                  type: string
+                  minLength: 3
+                  maxLength: 512
+                approvedAt:
+                  type: string
+                  format: date-time
+                expiresAt:
+                  type: string
+                  format: date-time
+              x-kubernetes-validations:
+                - rule: 'self.state != "Approved" || (has(self.approver) && has(self.decisionReason) && has(self.approvedAt) && has(self.expiresAt) && timestamp(self.expiresAt) > timestamp(self.approvedAt))'
+                  message: approved requests require approver, decision reason, and increasing approval/expiry timestamps
+                - rule: 'self.state != "Denied" || (has(self.approver) && has(self.decisionReason))'
+                  message: denied requests require approver and decision reason
+      additionalPrinterColumns:
+        - name: State
+          type: string
+          jsonPath: .status.state
+        - name: Assignment
+          type: string
+          jsonPath: .spec.assignmentRef.name
+        - name: Backend
+          type: string
+          jsonPath: .spec.backend
+        - name: Method
+          type: string
+          jsonPath: .spec.method
+        - name: Host
+          type: string
+          jsonPath: .spec.host
+        - name: Expires
+          type: date
+          jsonPath: .status.expiresAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxegressevents.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: sandboxegressevents
+    singular: sandboxegressevent
+    kind: SandboxEgressEvent
+    shortNames: [sbevent]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required:
+                - timestamp
+                - assignmentRef
+                - podUid
+                - capabilityBundleName
+                - capabilityBundleRevision
+                - backend
+                - method
+                - host
+                - path
+                - allowed
+                - reason
+                - decisionSource
+              properties:
+                timestamp:
+                  type: string
+                  format: date-time
+                assignmentRef:
+                  type: object
+                  required: [name, uid]
+                  properties:
+                    name: { type: string, minLength: 1, maxLength: 253 }
+                    uid: { type: string, minLength: 1, maxLength: 128 }
+                sandboxId: { type: string, maxLength: 253 }
+                podUid: { type: string, minLength: 1, maxLength: 128 }
+                capabilityBundleName: { type: string, minLength: 1, maxLength: 253 }
+                capabilityBundleRevision: { type: string, minLength: 8, maxLength: 128 }
+                logicalTenant: { type: string, maxLength: 128 }
+                team: { type: string, maxLength: 128 }
+                permissionLevel: { type: string, maxLength: 64 }
+                boundaryDisplayName: { type: string, maxLength: 128 }
+                backend:
+                  type: string
+                  pattern: '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+                method:
+                  type: string
+                  pattern: '^[A-Z][A-Z0-9_-]{0,31}$'
+                host: { type: string, minLength: 1, maxLength: 253 }
+                path: { type: string, minLength: 1, maxLength: 2048, pattern: '^/' }
+                allowed: { type: boolean }
+                reason: { type: string, minLength: 1, maxLength: 512 }
+                decisionSource:
+                  type: string
+                  enum: [bundle, access-request, deny]
+                accessRequestName: { type: string, maxLength: 253 }
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: SandboxEgressEvent.spec is immutable
+                - rule: '!self.path.contains("?") && !self.path.contains("#")'
+                  message: path must not contain a query string or fragment
+                - rule: 'self.decisionSource != "access-request" || has(self.accessRequestName)'
+                  message: access-request decisions require an access request name
+      additionalPrinterColumns:
+        - name: Time
+          type: date
+          jsonPath: .spec.timestamp
+        - name: Sandbox
+          type: string
+          jsonPath: .spec.sandboxId
+        - name: Assignment
+          type: string
+          jsonPath: .spec.assignmentRef.name
+        - name: Backend
+          type: string
+          jsonPath: .spec.backend
+        - name: Allowed
+          type: boolean
+          jsonPath: .spec.allowed
+        - name: Source
+          type: string
+          jsonPath: .spec.decisionSource
