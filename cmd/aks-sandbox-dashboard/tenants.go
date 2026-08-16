@@ -37,6 +37,9 @@ func (g *governanceDashboard) createTenantPolicy(w http.ResponseWriter, r *http.
 		http.Error(w, "Tenant policy identity fields are invalid", http.StatusBadRequest)
 		return
 	}
+	if _, ok := g.requireAdminTenant(w, r, logicalTenant); !ok {
+		return
+	}
 	bundles := uniqueLines(form.Get("allowedCapabilityBundles"))
 	prefixes := uniqueLines(form.Get("allowedCapabilityBundlePrefixes"))
 	if len(bundles)+len(prefixes) == 0 || len(bundles) > 128 || len(prefixes) > 128 {
@@ -106,7 +109,7 @@ func (g *governanceDashboard) createTenantPolicy(w http.ResponseWriter, r *http.
 	g.redirectWithMessage(w, r, "/admin", fmt.Sprintf("Tenant policy %s created", name))
 }
 
-func (g *governanceDashboard) tenantPolicyRows(ctx context.Context) ([]tenantPolicyPageRow, error) {
+func (g *governanceDashboard) tenantPolicyRows(ctx context.Context, tenants map[string]struct{}) ([]tenantPolicyPageRow, error) {
 	list, err := g.client.Resource(dashboardTenantPoliciesGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -116,6 +119,9 @@ func (g *governanceDashboard) tenantPolicyRows(ctx context.Context) ([]tenantPol
 		policy := &assignmentv1alpha1.SandboxTenantPolicy{}
 		if err := fromUnstructured(&list.Items[i], policy); err != nil {
 			return nil, err
+		}
+		if !tenantAllowed(tenants, policy.Spec.LogicalTenant) {
+			continue
 		}
 		rows = append(rows, tenantPolicyPageRow{
 			Name: policy.Name, LogicalTenant: policy.Spec.LogicalTenant,

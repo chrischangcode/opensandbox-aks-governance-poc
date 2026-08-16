@@ -9,3 +9,4 @@ infra/main.json
 bin/
 *.kubeconfig
 demo-output/
+redaicli-results/

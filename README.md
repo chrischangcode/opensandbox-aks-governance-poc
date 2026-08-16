@@ -17,7 +17,12 @@ This POC runs [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) on
 It extends the public [AKS Kata example](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/examples/aks-kata.md). The POC uses one Azure tenant and simulates multiple logical tenants inside it.
 
 > [!WARNING]
-> The local development login is intentionally restricted to a loopback address. It is for port-forwarded POC use only. Do not expose it through an ingress or load balancer.
+> This is a research POC, not a production service. Lifecycle callers still use
+> reusable, short-lived Kubernetes bearer tokens; internal service traffic is
+> not protected by mTLS; and `external-mediator` proves decisions rather than
+> transparently intercepting every connection. Keep the dashboard and APIs
+> port-forwarded to loopback, use a development cluster, and review the
+> [remaining P0 service work](docs/p0-service-boundary-findings.md) before reuse.
 
 ## See it in action
 
@@ -223,6 +228,10 @@ make all
 
 `make local-config` creates `.make.env` with generated resource names and an API key. The file is ignored by Git and must remain local.
 
+`make image-push` and `make k8s-deploy` can use a convenient build tag, but
+the deployment step resolves the pushed OpenSandbox server image to an
+immutable ACR digest before it renders the Kubernetes manifest.
+
 Verify Kata isolation:
 
 ```bash
@@ -235,7 +244,9 @@ The Python smoke test should print `runtime class: kata-optimized`.
 
 ## 2. Build and deploy governance
 
-Build `assignmentd` in the ACR created by the baseline:
+Build `assignmentd` in the ACR created by the baseline. The tag is only a
+push handle; resolve it to a digest-pinned deployment reference before
+applying the manifest:
 
 ```bash
 source .make.env
@@ -246,7 +257,9 @@ az acr build \
   --image opensandbox/assignmentd:governance-poc \
   .
 
-export ASSIGNMENTD_IMAGE="$ACR_NAME.azurecr.io/opensandbox/assignmentd:governance-poc"
+export ASSIGNMENTD_IMAGE="$(
+  ./scripts/resolve-acr-image.sh "$ACR_NAME" "opensandbox/assignmentd" "governance-poc" "${SUBSCRIPTION_ID:-}"
+)"
 ```
 
 Install the data model, logical boundaries, and sandbox ServiceAccount:
@@ -279,8 +292,8 @@ kubectl get secret opensandbox-server -n opensandbox -o json |
 Deploy the service:
 
 ```bash
-envsubst '${ASSIGNMENTD_IMAGE}' \
-  < deploy/governance/k8s/assignmentd.yaml |
+ASSIGNMENTD_IMAGE="$ASSIGNMENTD_IMAGE" \
+  ./scripts/render-assignmentd.sh |
   kubectl apply -f -
 
 kubectl rollout status deployment/assignmentd \
@@ -469,13 +482,23 @@ opencode --version
 
 This repository includes:
 
-- `opencode.json` — registers the local `sandbox_governance` MCP server;
+- `opencode.json` — registers the local `sandbox_governance` MCP server but
+  leaves it disabled by default;
 - `.opencode/agents/sandbox-only.md` — denies every built-in tool and allows
   only the sandbox MCP tools; and
 - `harness/run-mcp.sh` — starts required local port-forwards, reads the
   Kubernetes API key Secret without printing it, and starts the MCP server.
 
-Check the MCP connection:
+The checked-in MCP entry is intentionally disabled. Only opt in after
+reviewing `harness/run-mcp.sh` and `harness/server.py` in a trusted local
+checkout, because enabling it authorizes repository-local host code to use
+your kubeconfig, start port-forwards, and fetch OpenSandbox credentials. Do
+not enable it for an unreviewed branch or pull request. If you opt in, keep
+the change local and do not commit it.
+
+To opt in locally after review, change `opencode.json` `"enabled"` to `true`
+in your own checkout (or apply an equivalent user-local OpenCode override),
+then check the MCP connection:
 
 ```bash
 cd ~/go/opensandbox-aks-governance-poc
@@ -491,8 +514,9 @@ opencode run \
   "Use the least-privileged approved template to run: uname -a && python --version"
 ```
 
-The agent cannot call host `bash`, edit files, browse the web, or launch
-subagents. Its only execution tool creates a fresh sandbox through
+After that explicit opt-in, the agent cannot call host `bash`, edit files,
+browse the web, or launch subagents. Its only execution tool creates a fresh
+sandbox through
 `assignmentd`, waits for the assignment and Kata Pod to become ready, runs the
 command only when the bundle's command policy allows it, captures attribution
 evidence, and confirms the assignment, workload, and Pod are gone before

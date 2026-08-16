@@ -8,6 +8,12 @@ import (
 	assignmentv1alpha1 "github.com/chrischangcode/opensandbox-aks-governance-poc/api/assignment/v1alpha1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
+)
+
+var (
+	errPrincipalBindingMissing   = errors.New("authenticated principal has no sandbox tenant binding")
+	errPrincipalBindingAmbiguous = errors.New("principal must have exactly one active binding")
 )
 
 type principalTenantScopes struct {
@@ -16,7 +22,11 @@ type principalTenantScopes struct {
 }
 
 func (g *governanceDashboard) principalScopes(ctx context.Context, identity authenticatedIdentity) (principalTenantScopes, error) {
-	list, err := g.client.Resource(dashboardPrincipalBindingsGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
+	return loadPrincipalScopes(ctx, g.client, g.namespace, identity)
+}
+
+func loadPrincipalScopes(ctx context.Context, client dynamic.Interface, namespace string, identity authenticatedIdentity) (principalTenantScopes, error) {
+	list, err := client.Resource(dashboardPrincipalBindingsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return principalTenantScopes{}, err
 	}
@@ -32,12 +42,12 @@ func (g *governanceDashboard) principalScopes(ctx context.Context, identity auth
 			continue
 		}
 		if matched != nil {
-			return principalTenantScopes{}, fmt.Errorf("principal must have exactly one active binding")
+			return principalTenantScopes{}, fmt.Errorf("%w", errPrincipalBindingAmbiguous)
 		}
 		matched = binding
 	}
 	if matched == nil {
-		return principalTenantScopes{}, errors.New("authenticated principal has no sandbox tenant binding")
+		return principalTenantScopes{}, fmt.Errorf("%w", errPrincipalBindingMissing)
 	}
 	scopes := principalTenantScopes{
 		requester: make(map[string]struct{}, len(matched.Spec.RequesterTenants)),

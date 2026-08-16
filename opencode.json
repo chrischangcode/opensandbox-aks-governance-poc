@@ -4,7 +4,7 @@
     "sandbox_governance": {
       "type": "local",
       "command": ["bash", "./harness/run-mcp.sh"],
-      "enabled": true,
+      "enabled": false,
       "timeout": 360000
     }
   }

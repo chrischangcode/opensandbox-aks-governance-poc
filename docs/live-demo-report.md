@@ -196,8 +196,10 @@ continuity, Pod UID rotation, and rejection of pre-snapshot authority.
 
 The script creates Kubernetes Secret `assignmentd-credential-broker` from an
 `openssl`-generated value piped directly to `kubectl`, then unsets the shell
-value. The key is not printed or committed. Terminal evidence is written under
-`demo-output/<timestamp>/extended-governance/`.
+value. During rotation, both the active key and grace-period key remain
+Secret-backed; the Deployment contains only `secretKeyRef` entries and
+non-secret key IDs. Keys are not printed or committed. Terminal evidence is
+written under `demo-output/<timestamp>/extended-governance/`.
 
 The full live replay completed on 2026-08-16. Representative sanitized
 evidence:
@@ -278,7 +280,9 @@ az acr build \
   --image opensandbox/assignmentd:governance-poc \
   .
 
-export ASSIGNMENTD_IMAGE="<acr-name>.azurecr.io/opensandbox/assignmentd:governance-poc"
+export ASSIGNMENTD_IMAGE="$(
+  ./scripts/resolve-acr-image.sh "<acr-name>" "opensandbox/assignmentd" "governance-poc"
+)"
 ```
 
 The API key was copied between Kubernetes Secrets without decoding or printing
@@ -303,8 +307,8 @@ kubectl apply -f deploy/governance/k8s/sandbox-templates.yaml
 kubectl apply -f deploy/governance/k8s/tenant-policies.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-serviceaccount.yaml
 
-envsubst '${ASSIGNMENTD_IMAGE}' \
-  < deploy/governance/k8s/assignmentd.yaml |
+ASSIGNMENTD_IMAGE="$ASSIGNMENTD_IMAGE" \
+  ./scripts/render-assignmentd.sh |
   kubectl apply -f -
 
 kubectl rollout status deployment/assignmentd \
@@ -468,7 +472,13 @@ opencode --version
 1.18.18
 ```
 
-The MCP connection was checked with:
+For publication safety, the checked-in `opencode.json` now leaves the
+repository-local MCP entry disabled by default. The replay below reflects an
+explicit local opt-in after reviewing `harness/run-mcp.sh` and
+`harness/server.py`.
+
+After locally opting in by setting `opencode.json` `"enabled"` to `true` in the
+trusted checkout, the MCP connection was checked with:
 
 ```bash
 cd ~/go/opensandbox-aks-governance-poc

@@ -233,42 +233,47 @@ func (g *governanceDashboard) adminPage(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	templates, err := g.templateRows(r.Context())
+	scopes, err := g.principalScopes(r.Context(), identity)
+	if err != nil || len(scopes.admin) == 0 {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	templates, err := g.templateRows(r.Context(), scopes.admin)
 	if err != nil {
 		g.internalError(w, r, "list sandbox templates", err)
 		return
 	}
-	requests, err := g.requestRows(r.Context())
+	requests, err := g.requestRows(r.Context(), scopes.admin)
 	if err != nil {
 		g.internalError(w, r, "list access requests", err)
 		return
 	}
-	assignments, err := g.assignmentRows(r.Context(), nil)
+	assignments, err := g.assignmentRows(r.Context(), scopes.admin)
 	if err != nil {
 		g.internalError(w, r, "list assignments", err)
 		return
 	}
-	bundles, err := g.bundleRows(r.Context())
+	bundles, err := g.bundleRows(r.Context(), scopes.admin)
 	if err != nil {
 		g.internalError(w, r, "list capability bundles", err)
 		return
 	}
-	events, err := g.eventRows(r.Context(), false, nil)
+	events, err := g.eventRows(r.Context(), false, scopes.admin)
 	if err != nil {
 		g.internalError(w, r, "list egress events", err)
 		return
 	}
-	credentials, err := g.credentialRows(r.Context())
+	credentials, err := g.credentialRows(r.Context(), scopes.admin)
 	if err != nil {
 		g.internalError(w, r, "list credential events", err)
 		return
 	}
-	validations, err := g.validationRows(r.Context())
+	validations, err := g.validationRows(r.Context(), scopes.admin)
 	if err != nil {
 		g.internalError(w, r, "list validation runs", err)
 		return
 	}
-	tenantPolicies, err := g.tenantPolicyRows(r.Context())
+	tenantPolicies, err := g.tenantPolicyRows(r.Context(), scopes.admin)
 	if err != nil {
 		g.internalError(w, r, "list tenant policies", err)
 		return
@@ -559,6 +564,19 @@ func (g *governanceDashboard) requireAdmin(w http.ResponseWriter, r *http.Reques
 	return identity, true
 }
 
+func (g *governanceDashboard) requireAdminTenant(w http.ResponseWriter, r *http.Request, logicalTenant string) (authenticatedIdentity, bool) {
+	identity, ok := g.requireAdmin(w, r)
+	if !ok {
+		return authenticatedIdentity{}, false
+	}
+	scopes, err := g.principalScopes(r.Context(), identity)
+	if err != nil || !tenantAllowed(scopes.admin, logicalTenant) {
+		http.Error(w, "Administrator is not authorized for this logical tenant", http.StatusForbidden)
+		return authenticatedIdentity{}, false
+	}
+	return identity, true
+}
+
 func (g *governanceDashboard) pendingRequest(w http.ResponseWriter, r *http.Request, name string) (*unstructured.Unstructured, *assignmentv1alpha1.SandboxAccessRequest, bool) {
 	if errors := validation.IsDNS1123Subdomain(name); len(errors) != 0 {
 		http.Error(w, "Invalid access request name", http.StatusBadRequest)
@@ -731,9 +749,9 @@ func (g *governanceDashboard) assignmentRows(ctx context.Context, tenants map[st
 		if assignmentObject.Status.PodRef != nil {
 			row.Pod = assignmentObject.Status.PodRef.Name
 		}
+		row.LogicalTenant = assignmentLogicalTenant(assignmentObject, bundles)
 		if bundle != nil && bundle.Spec.Governance != nil {
 			row.Boundary = bundle.Spec.Governance.DisplayName
-			row.LogicalTenant = bundle.Spec.Governance.LogicalTenant
 			row.Team = bundle.Spec.Governance.Team
 			row.Permission = bundle.Spec.Governance.PermissionLevel
 		}
@@ -744,6 +762,22 @@ func (g *governanceDashboard) assignmentRows(ctx context.Context, tenants map[st
 	}
 	slices.SortFunc(rows, func(a, b assignmentPageRow) int { return strings.Compare(a.Name, b.Name) })
 	return rows, nil
+}
+
+func (g *governanceDashboard) assignmentMap(ctx context.Context) (map[string]*assignmentv1alpha1.SandboxAssignment, error) {
+	list, err := g.client.Resource(dashboardAssignmentsGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]*assignmentv1alpha1.SandboxAssignment, len(list.Items))
+	for i := range list.Items {
+		assignmentObject := &assignmentv1alpha1.SandboxAssignment{}
+		if err := fromUnstructured(&list.Items[i], assignmentObject); err != nil {
+			return nil, err
+		}
+		result[assignmentObject.Name] = assignmentObject
+	}
+	return result, nil
 }
 
 func (g *governanceDashboard) bundleMap(ctx context.Context) (map[string]*assignmentv1alpha1.CapabilityBundle, error) {
@@ -762,13 +796,78 @@ func (g *governanceDashboard) bundleMap(ctx context.Context) (map[string]*assign
 	return result, nil
 }
 
-func (g *governanceDashboard) bundleRows(ctx context.Context) ([]bundlePageRow, error) {
+func bundleLogicalTenant(bundle *assignmentv1alpha1.CapabilityBundle) string {
+	if bundle == nil || bundle.Spec.Governance == nil {
+		return ""
+	}
+	return strings.TrimSpace(bundle.Spec.Governance.LogicalTenant)
+}
+
+func assignmentLogicalTenant(
+	assignmentObject *assignmentv1alpha1.SandboxAssignment,
+	bundles map[string]*assignmentv1alpha1.CapabilityBundle,
+) string {
+	if assignmentObject == nil {
+		return ""
+	}
+	if logicalTenant := strings.TrimSpace(assignmentObject.Spec.LogicalTenant); logicalTenant != "" {
+		return logicalTenant
+	}
+	return bundleLogicalTenant(bundles[assignmentObject.Spec.CapabilityBundleRef.Name])
+}
+
+func requestLogicalTenant(
+	request *assignmentv1alpha1.SandboxAccessRequest,
+	assignments map[string]*assignmentv1alpha1.SandboxAssignment,
+	bundles map[string]*assignmentv1alpha1.CapabilityBundle,
+) string {
+	if request == nil {
+		return ""
+	}
+	if logicalTenant := strings.TrimSpace(request.Spec.Requester.LogicalTenant); logicalTenant != "" {
+		return logicalTenant
+	}
+	return assignmentLogicalTenant(assignments[request.Spec.AssignmentRef.Name], bundles)
+}
+
+func credentialEventLogicalTenant(
+	event *assignmentv1alpha1.SandboxCredentialEvent,
+	assignments map[string]*assignmentv1alpha1.SandboxAssignment,
+	bundles map[string]*assignmentv1alpha1.CapabilityBundle,
+) string {
+	if event == nil {
+		return ""
+	}
+	if logicalTenant := assignmentLogicalTenant(assignments[event.Spec.AssignmentRef.Name], bundles); logicalTenant != "" {
+		return logicalTenant
+	}
+	return bundleLogicalTenant(bundles[event.Spec.CapabilityBundleName])
+}
+
+func validationRunLogicalTenant(
+	run *assignmentv1alpha1.SandboxValidationRun,
+	assignments map[string]*assignmentv1alpha1.SandboxAssignment,
+	bundles map[string]*assignmentv1alpha1.CapabilityBundle,
+) string {
+	if run == nil {
+		return ""
+	}
+	if logicalTenant := assignmentLogicalTenant(assignments[run.Spec.AssignmentRef.Name], bundles); logicalTenant != "" {
+		return logicalTenant
+	}
+	return bundleLogicalTenant(bundles[run.Spec.CapabilityBundleName])
+}
+
+func (g *governanceDashboard) bundleRows(ctx context.Context, tenants map[string]struct{}) ([]bundlePageRow, error) {
 	bundles, err := g.bundleMap(ctx)
 	if err != nil {
 		return nil, err
 	}
 	rows := make([]bundlePageRow, 0, len(bundles))
 	for _, bundle := range bundles {
+		if !tenantAllowed(tenants, bundleLogicalTenant(bundle)) {
+			continue
+		}
 		row := bundlePageRow{Name: bundle.Name, UID: string(bundle.UID)}
 		if bundle.Spec.Governance != nil {
 			row.Boundary = bundle.Spec.Governance.DisplayName
@@ -841,10 +940,22 @@ func (g *governanceDashboard) eventRows(ctx context.Context, deniedOnly bool, te
 	return rows, nil
 }
 
-func (g *governanceDashboard) requestRows(ctx context.Context) ([]requestPageRow, error) {
+func (g *governanceDashboard) requestRows(ctx context.Context, tenants map[string]struct{}) ([]requestPageRow, error) {
 	list, err := g.client.Resource(dashboardRequestsGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
+	}
+	var assignments map[string]*assignmentv1alpha1.SandboxAssignment
+	var bundles map[string]*assignmentv1alpha1.CapabilityBundle
+	if tenants != nil {
+		assignments, err = g.assignmentMap(ctx)
+		if err != nil {
+			return nil, err
+		}
+		bundles, err = g.bundleMap(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	requests := make([]assignmentv1alpha1.SandboxAccessRequest, 0, len(list.Items))
@@ -860,6 +971,9 @@ func (g *governanceDashboard) requestRows(ctx context.Context) ([]requestPageRow
 	})
 	rows := make([]requestPageRow, 0, len(requests))
 	for _, request := range requests {
+		if !tenantAllowed(tenants, requestLogicalTenant(&request, assignments, bundles)) {
+			continue
+		}
 		row := requestPageRow{
 			Name:              request.Name,
 			State:             string(requestState(request.Status)),
@@ -887,16 +1001,31 @@ func (g *governanceDashboard) requestRows(ctx context.Context) ([]requestPageRow
 	return rows, nil
 }
 
-func (g *governanceDashboard) credentialRows(ctx context.Context) ([]credentialPageRow, error) {
+func (g *governanceDashboard) credentialRows(ctx context.Context, tenants map[string]struct{}) ([]credentialPageRow, error) {
 	list, err := g.client.Resource(dashboardCredentialsGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
+	}
+	var assignments map[string]*assignmentv1alpha1.SandboxAssignment
+	var bundles map[string]*assignmentv1alpha1.CapabilityBundle
+	if tenants != nil {
+		assignments, err = g.assignmentMap(ctx)
+		if err != nil {
+			return nil, err
+		}
+		bundles, err = g.bundleMap(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	events := make([]assignmentv1alpha1.SandboxCredentialEvent, 0, len(list.Items))
 	for i := range list.Items {
 		event := assignmentv1alpha1.SandboxCredentialEvent{}
 		if err := fromUnstructured(&list.Items[i], &event); err != nil {
 			return nil, err
+		}
+		if !tenantAllowed(tenants, credentialEventLogicalTenant(&event, assignments, bundles)) {
+			continue
 		}
 		events = append(events, event)
 	}
@@ -922,16 +1051,31 @@ func (g *governanceDashboard) credentialRows(ctx context.Context) ([]credentialP
 	return rows, nil
 }
 
-func (g *governanceDashboard) validationRows(ctx context.Context) ([]validationPageRow, error) {
+func (g *governanceDashboard) validationRows(ctx context.Context, tenants map[string]struct{}) ([]validationPageRow, error) {
 	list, err := g.client.Resource(dashboardValidationsGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
+	}
+	var assignments map[string]*assignmentv1alpha1.SandboxAssignment
+	var bundles map[string]*assignmentv1alpha1.CapabilityBundle
+	if tenants != nil {
+		assignments, err = g.assignmentMap(ctx)
+		if err != nil {
+			return nil, err
+		}
+		bundles, err = g.bundleMap(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	runs := make([]assignmentv1alpha1.SandboxValidationRun, 0, len(list.Items))
 	for i := range list.Items {
 		run := assignmentv1alpha1.SandboxValidationRun{}
 		if err := fromUnstructured(&list.Items[i], &run); err != nil {
 			return nil, err
+		}
+		if !tenantAllowed(tenants, validationRunLogicalTenant(&run, assignments, bundles)) {
+			continue
 		}
 		runs = append(runs, run)
 	}

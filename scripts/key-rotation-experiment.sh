@@ -35,7 +35,6 @@ cleanup() {
     kubectl apply -f - >/dev/null 2>&1 || true
   kubectl -n "$namespace" set env deployment/assignmentd \
     ASSIGNMENTD_BROKER_SIGNING_KEY_ID- \
-    ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY- \
     ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY_ID- >/dev/null 2>&1 || true
   kubectl -n "$namespace" rollout restart deployment/assignmentd >/dev/null 2>&1 || true
   kubectl -n "$namespace" rollout status deployment/assignmentd \
@@ -148,23 +147,25 @@ echo "==> Rotate to a new key while retaining the old key for grace"
 new_key="$(openssl rand -hex 32)"
 kubectl -n "$namespace" create secret generic assignmentd-credential-broker \
   --from-literal=signing-key="$new_key" \
+  --from-literal=previous-signing-key="$original_key" \
   --dry-run=client -o yaml |
   kubectl apply -f - >/dev/null
 kubectl -n "$namespace" set env deployment/assignmentd \
   ASSIGNMENTD_BROKER_SIGNING_KEY_ID=new \
-  ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY="$original_key" \
   ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY_ID=old >/dev/null
 kubectl -n "$namespace" rollout restart deployment/assignmentd >/dev/null
 kubectl -n "$namespace" rollout status deployment/assignmentd --timeout=180s >/dev/null
 start_forward
 
-configured_previous="$(
+configured_previous_ref="$(
   kubectl -n "$namespace" get deployment assignmentd -o json |
     jq -r '.spec.template.spec.containers[0].env[]
       | select(.name == "ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY")
-      | .value'
+      | [.valueFrom.secretKeyRef.name, .valueFrom.secretKeyRef.key]
+      | join("/")'
 )"
-[[ "$configured_previous" == "$original_key" ]]
+[[ "$configured_previous_ref" == \
+  "assignmentd-credential-broker/previous-signing-key" ]]
 configured_current_id="$(
   kubectl -n "$namespace" get deployment assignmentd -o json |
     jq -r '.spec.template.spec.containers[0].env[]
@@ -189,8 +190,11 @@ grace_status="$(
 [[ "$grace_status" == "200" ]]
 
 echo "==> Remove the old key and reject the stale credential"
+kubectl -n "$namespace" create secret generic assignmentd-credential-broker \
+  --from-literal=signing-key="$new_key" \
+  --dry-run=client -o yaml |
+  kubectl apply -f - >/dev/null
 kubectl -n "$namespace" set env deployment/assignmentd \
-  ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY- \
   ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY_ID- >/dev/null
 kubectl -n "$namespace" rollout restart deployment/assignmentd >/dev/null
 kubectl -n "$namespace" rollout status deployment/assignmentd --timeout=180s >/dev/null

@@ -136,6 +136,303 @@ func TestGovernanceScopesRequesterAndAdministratorByLogicalTenant(t *testing.T) 
 	}
 }
 
+func TestGovernanceAdminCreateRoutesRequireAuthorizedAdminTenant(t *testing.T) {
+	admin := authenticatedIdentity{TenantID: testTenantID, ObjectID: testAdminID, Name: "Administrator", Roles: []string{"OpenSandbox.Admin"}}
+
+	t.Run("capability bundle", func(t *testing.T) {
+		_, handler := newGovernanceTestHandler(t, governanceFixtureObjects(t)...)
+		form := url.Values{
+			"csrf": {"csrf"}, "name": {"tenant-b-reader"}, "displayName": {"Tenant B reader"},
+			"logicalTenant": {"tenant-b"}, "team": {"readers"}, "permissionLevel": {"reader"},
+			"egressRules": {""}, "allowedCommands": {""}, "validationRules": {""},
+		}
+		response := serveGovernance(handler, http.MethodPost, "/admin/bundles", form, admin, "csrf")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("bundle response = %d body=%s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("sandbox template", func(t *testing.T) {
+		tenantBBundle := &assignmentv1alpha1.CapabilityBundle{
+			TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "CapabilityBundle"},
+			ObjectMeta: metav1.ObjectMeta{Name: "tenant-b-bundle", Namespace: "aks-sandbox-system", UID: types.UID("bundle-b-uid")},
+			Spec: assignmentv1alpha1.CapabilityBundleSpec{Governance: &assignmentv1alpha1.GovernanceBoundary{
+				LogicalTenant: "tenant-b", Team: "readers", PermissionLevel: "reader", DisplayName: "Tenant B reader",
+			}},
+		}
+		_, handler := newGovernanceTestHandler(t, append(governanceFixtureObjects(t), tenantBBundle)...)
+		form := url.Values{
+			"csrf": {"csrf"}, "name": {"python-reader-b"}, "displayName": {"Python reader"},
+			"description": {"Governed Python sandbox."}, "image": {"python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			"entrypoint": {`["tail","-f","/dev/null"]`}, "capabilityBundle": {"tenant-b-bundle"},
+			"cpu": {"500m"}, "memory": {"512Mi"}, "timeoutSeconds": {"1800"}, "enabled": {"true"},
+		}
+		response := serveGovernance(handler, http.MethodPost, "/admin/templates", form, admin, "csrf")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("template response = %d body=%s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("tenant policy", func(t *testing.T) {
+		_, handler := newGovernanceTestHandler(t, governanceFixtureObjects(t)...)
+		form := url.Values{
+			"csrf": {"csrf"}, "name": {"tenant-b-v1"}, "logicalTenant": {"tenant-b"}, "workloadNamespace": {"opensandbox"},
+			"allowedCapabilityBundles": {"tenant-b-reader"}, "allowedCapabilityBundlePrefixes": {""},
+			"maxConcurrentSandboxes": {"2"}, "maxLifetimeSeconds": {"1800"}, "maxAccessMinutes": {"30"},
+			"maxCpu": {"1"}, "maxMemory": {"1Gi"}, "enabled": {"true"},
+		}
+		response := serveGovernance(handler, http.MethodPost, "/admin/tenant-policies", form, admin, "csrf")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("tenant policy response = %d body=%s", response.Code, response.Body.String())
+		}
+	})
+}
+
+func TestGovernanceAdminPageScopesAllCollectionsByAdminTenant(t *testing.T) {
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	tenantBBundle := &assignmentv1alpha1.CapabilityBundle{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "CapabilityBundle"},
+		ObjectMeta: metav1.ObjectMeta{Name: "tenant-b-reader", Namespace: "aks-sandbox-system", UID: types.UID("bundle-b-uid")},
+		Spec: assignmentv1alpha1.CapabilityBundleSpec{Governance: &assignmentv1alpha1.GovernanceBoundary{
+			LogicalTenant: "tenant-b", Team: "team-b", PermissionLevel: "reader", DisplayName: "Team B reader",
+		}},
+	}
+	tenantBTemplate := &assignmentv1alpha1.SandboxTemplate{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxTemplate"},
+		ObjectMeta: metav1.ObjectMeta{Name: "python-reader-b", Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxTemplateSpec{
+			DisplayName: "Python reader B",
+			Image:       "python@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			Entrypoint:  []string{"tail", "-f", "/dev/null"},
+			CapabilityBundleRef: assignmentv1alpha1.CapabilityBundleReference{
+				Name:           "tenant-b-reader",
+				PolicyRevision: "sha256:bundle-b",
+			},
+			Resources:      assignmentv1alpha1.SandboxTemplateResources{CPU: "500m", Memory: "512Mi"},
+			TimeoutSeconds: 1800,
+			Enabled:        true,
+		},
+	}
+	tenantBAssignment := &assignmentv1alpha1.SandboxAssignment{
+		TypeMeta: metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxAssignment"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "assignment-b", Namespace: "aks-sandbox-system", UID: types.UID("assignment-b-uid"),
+			Annotations: map[string]string{assignment.SandboxIDAnnotation: "sandbox-b"},
+		},
+		Spec: assignmentv1alpha1.SandboxAssignmentSpec{
+			LogicalTenant: "tenant-b",
+			CapabilityBundleRef: assignmentv1alpha1.CapabilityBundleReference{
+				Name: "tenant-b-reader",
+			},
+		},
+		Status: assignmentv1alpha1.SandboxAssignmentStatus{
+			PodRef: &assignmentv1alpha1.ObjectReference{Name: "pod-b", UID: types.UID("pod-b-uid")},
+			ResolvedCapabilityBundle: &assignmentv1alpha1.ResolvedCapabilityBundle{
+				Name: "tenant-b-reader", UID: types.UID("bundle-b-uid"), PolicyRevision: "sha256:bundle-b",
+			},
+			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
+		},
+	}
+	tenantBEvent := &assignmentv1alpha1.SandboxEgressEvent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxEgressEvent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "denied-b", Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxEgressEventSpec{
+			Timestamp: metav1.NewTime(now.Add(2 * time.Minute)),
+			AssignmentRef: assignmentv1alpha1.AssignmentReference{
+				Name: "assignment-b", UID: types.UID("assignment-b-uid"),
+			},
+			SandboxID: "sandbox-b", PodUID: types.UID("pod-b-uid"),
+			CapabilityBundleName: "tenant-b-reader", CapabilityBundleRevision: "sha256:bundle-b",
+			LogicalTenant: "tenant-b", Team: "team-b", PermissionLevel: "reader",
+			Backend: "cachew", Method: "GET", Host: "tenant-b.example.test", Path: "/private/repo",
+			Allowed: false, Reason: "tenant-b denied", DecisionSource: assignmentv1alpha1.DecisionSourceDeny,
+		},
+	}
+	tenantBRequest := pendingDashboardAccessRequest("access-b")
+	tenantBRequest.Spec.AssignmentRef = assignmentv1alpha1.AssignmentReference{Name: "assignment-b", UID: types.UID("assignment-b-uid")}
+	tenantBRequest.Spec.PodUID = types.UID("pod-b-uid")
+	tenantBRequest.Spec.BasePolicyRevision = "sha256:bundle-b"
+	tenantBRequest.Spec.Host = "tenant-b.example.test"
+	tenantBRequest.Spec.Path = "/private/repo"
+	tenantBRequest.Spec.Reason = "Need tenant-b repository access."
+	tenantBRequest.Spec.Requester.LogicalTenant = "tenant-b"
+	tenantBRequest.Spec.Requester.Team = "team-b"
+	tenantBRequest.CreationTimestamp = metav1.NewTime(now.Add(3 * time.Minute))
+	tenantBPolicy := &assignmentv1alpha1.SandboxTenantPolicy{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxTenantPolicy"},
+		ObjectMeta: metav1.ObjectMeta{Name: "tenant-b-v1", Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxTenantPolicySpec{
+			LogicalTenant: "tenant-b", WorkloadNamespace: "opensandbox",
+			AllowedCapabilityBundles: []string{"tenant-b-reader"},
+			MaxConcurrentSandboxes:   2,
+			MaxLifetimeSeconds:       1800, MaxAccessRequestDurationSeconds: 1800,
+			MaxCPU: "1", MaxMemory: "1Gi", Enabled: true,
+		},
+	}
+	tenantBCredential := &assignmentv1alpha1.SandboxCredentialEvent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxCredentialEvent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "credential-b", Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxCredentialEventSpec{
+			Timestamp: metav1.NewTime(now.Add(4 * time.Minute)),
+			GrantID:   "grant-b", Action: "Granted", TaskID: "task-b",
+			AssignmentRef: assignmentv1alpha1.AssignmentReference{
+				Name: "assignment-b", UID: types.UID("assignment-b-uid"),
+			},
+			PodUID:                   types.UID("pod-b-uid"),
+			SandboxID:                "sandbox-b",
+			CapabilityBundleName:     "tenant-b-reader",
+			CapabilityBundleRevision: "sha256:bundle-b",
+			Backend:                  "cachew",
+			Method:                   "GET",
+			Host:                     "tenant-b.example.test",
+			Path:                     "/private/repo",
+			ExpiresAt:                metav1.NewTime(now.Add(34 * time.Minute)),
+		},
+	}
+	tenantBValidation := &assignmentv1alpha1.SandboxValidationRun{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxValidationRun"},
+		ObjectMeta: metav1.ObjectMeta{Name: "validation-b", Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxValidationRunSpec{
+			TaskID:                   "task-b",
+			Repository:               "org/repo-b",
+			SourceRevision:           "deadbeefb",
+			ChangedPaths:             []string{"cmd/b/main.go"},
+			SelectedCommands:         []string{"go test ./cmd/b"},
+			TemplateName:             "python-reader-b",
+			AssignmentRef:            assignmentv1alpha1.AssignmentReference{Name: "assignment-b", UID: types.UID("assignment-b-uid")},
+			PodUID:                   types.UID("pod-b-uid"),
+			SandboxID:                "sandbox-b",
+			CapabilityBundleName:     "tenant-b-reader",
+			CapabilityBundleRevision: "sha256:bundle-b",
+			StartedAt:                metav1.NewTime(now.Add(5 * time.Minute)),
+		},
+		Status: assignmentv1alpha1.SandboxValidationRunStatus{
+			State: assignmentv1alpha1.ValidationRunFailed,
+			Results: []assignmentv1alpha1.SandboxValidationCommandResult{
+				{Command: "go test ./cmd/b", ExitCode: 1, StdoutSHA256: "stdout-b", StderrSHA256: "stderr-b"},
+			},
+			CleanedUp: true,
+			Message:   "tenant-b validation failed",
+		},
+	}
+	tenantATemplate := &assignmentv1alpha1.SandboxTemplate{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxTemplate"},
+		ObjectMeta: metav1.ObjectMeta{Name: "python-reader-a", Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxTemplateSpec{
+			DisplayName: "Python reader A",
+			Image:       "python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Entrypoint:  []string{"tail", "-f", "/dev/null"},
+			CapabilityBundleRef: assignmentv1alpha1.CapabilityBundleReference{
+				Name:           "coding",
+				PolicyRevision: "sha256:0123456789",
+			},
+			Resources:      assignmentv1alpha1.SandboxTemplateResources{CPU: "500m", Memory: "512Mi"},
+			TimeoutSeconds: 1800,
+			Enabled:        true,
+		},
+	}
+	tenantARequest := pendingDashboardAccessRequest("access-a")
+	tenantARequest.CreationTimestamp = metav1.NewTime(now.Add(time.Minute))
+	tenantACredential := &assignmentv1alpha1.SandboxCredentialEvent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxCredentialEvent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "credential-a", Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxCredentialEventSpec{
+			Timestamp: metav1.NewTime(now),
+			GrantID:   "grant-a", Action: "Granted", TaskID: "task-a",
+			AssignmentRef: assignmentv1alpha1.AssignmentReference{
+				Name: "assignment-a", UID: types.UID("assignment-uid"),
+			},
+			PodUID:                   types.UID("pod-uid"),
+			SandboxID:                "sandbox-a",
+			CapabilityBundleName:     "coding",
+			CapabilityBundleRevision: "sha256:0123456789",
+			Backend:                  "cachew",
+			Method:                   "GET",
+			Host:                     "cachew.example.test",
+			Path:                     "/repo/info/refs",
+			ExpiresAt:                metav1.NewTime(now.Add(30 * time.Minute)),
+		},
+	}
+	tenantAValidation := &assignmentv1alpha1.SandboxValidationRun{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxValidationRun"},
+		ObjectMeta: metav1.ObjectMeta{Name: "validation-a", Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxValidationRunSpec{
+			TaskID:                   "task-a",
+			Repository:               "org/repo-a",
+			SourceRevision:           "deadbeefa",
+			ChangedPaths:             []string{"cmd/a/main.go"},
+			SelectedCommands:         []string{"go test ./cmd/a"},
+			TemplateName:             "python-reader-a",
+			AssignmentRef:            assignmentv1alpha1.AssignmentReference{Name: "assignment-a", UID: types.UID("assignment-uid")},
+			PodUID:                   types.UID("pod-uid"),
+			SandboxID:                "sandbox-a",
+			CapabilityBundleName:     "coding",
+			CapabilityBundleRevision: "sha256:0123456789",
+			StartedAt:                metav1.NewTime(now.Add(30 * time.Second)),
+		},
+		Status: assignmentv1alpha1.SandboxValidationRunStatus{
+			State: assignmentv1alpha1.ValidationRunSucceeded,
+			Results: []assignmentv1alpha1.SandboxValidationCommandResult{
+				{Command: "go test ./cmd/a", ExitCode: 0, StdoutSHA256: "stdout-a", StderrSHA256: "stderr-a"},
+			},
+			CleanedUp: true,
+			Message:   "tenant-a validation passed",
+		},
+	}
+
+	fixtures := append(governanceFixtureObjects(t),
+		tenantATemplate,
+		tenantARequest,
+		tenantACredential,
+		tenantAValidation,
+		tenantBBundle,
+		tenantBTemplate,
+		tenantBAssignment,
+		tenantBEvent,
+		tenantBRequest,
+		tenantBPolicy,
+		tenantBCredential,
+		tenantBValidation,
+	)
+
+	_, handler := newGovernanceTestHandler(t, fixtures...)
+	admin := authenticatedIdentity{TenantID: testTenantID, ObjectID: testAdminID, Name: "Administrator", Roles: []string{"OpenSandbox.Admin"}}
+	response := serveGovernance(handler, http.MethodGet, "/admin", nil, admin, "csrf")
+	if response.Code != http.StatusOK {
+		t.Fatalf("admin page response = %d body=%s", response.Code, response.Body.String())
+	}
+
+	body := response.Body.String()
+	for _, expected := range []string{
+		"python-reader-a",
+		"access-a",
+		"assignment-a",
+		"coding",
+		"cachew.example.test",
+		"grant-a",
+		"validation-a",
+		"tenant-a-v1",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected admin page to contain %q, body=%s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{
+		"python-reader-b",
+		"access-b",
+		"assignment-b",
+		"tenant-b-reader",
+		"tenant-b.example.test",
+		"grant-b",
+		"validation-b",
+		"tenant-b-v1",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("expected admin page to exclude %q, body=%s", forbidden, body)
+		}
+	}
+}
+
 func TestGovernanceApproveAndDenyUseAuthenticatedAdmin(t *testing.T) {
 	t.Run("approve", func(t *testing.T) {
 		request := pendingDashboardAccessRequest("access-a")

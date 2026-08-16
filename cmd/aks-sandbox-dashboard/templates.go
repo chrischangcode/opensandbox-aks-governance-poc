@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	assignmentv1alpha1 "github.com/chrischangcode/opensandbox-aks-governance-poc/api/assignment/v1alpha1"
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/governance"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,10 +27,17 @@ type templatePageRow struct {
 	CPU, Memory, Timeout, Enabled                                       string
 }
 
-func (g *governanceDashboard) templateRows(ctx context.Context) ([]templatePageRow, error) {
+func (g *governanceDashboard) templateRows(ctx context.Context, tenants map[string]struct{}) ([]templatePageRow, error) {
 	list, err := g.client.Resource(dashboardTemplatesGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
+	}
+	var bundles map[string]*assignmentv1alpha1.CapabilityBundle
+	if tenants != nil {
+		bundles, err = g.bundleMap(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	rows := make([]templatePageRow, 0, len(list.Items))
 	for i := range list.Items {
@@ -39,6 +47,9 @@ func (g *governanceDashboard) templateRows(ctx context.Context) ([]templatePageR
 		description, _, _ := unstructured.NestedString(item.Object, "spec", "description")
 		image, _, _ := unstructured.NestedString(item.Object, "spec", "image")
 		bundle, _, _ := unstructured.NestedString(item.Object, "spec", "capabilityBundleRef", "name")
+		if !tenantAllowed(tenants, bundleLogicalTenant(bundles[bundle])) {
+			continue
+		}
 		cpu, _, _ := unstructured.NestedString(item.Object, "spec", "resources", "cpu")
 		memory, _, _ := unstructured.NestedString(item.Object, "spec", "resources", "memory")
 		timeoutSeconds, _, _ := unstructured.NestedInt64(item.Object, "spec", "timeoutSeconds")
@@ -86,6 +97,14 @@ func (g *governanceDashboard) createSandboxTemplate(w http.ResponseWriter, r *ht
 			return
 		}
 		g.resourceError(w, "get capability bundle", err)
+		return
+	}
+	logicalTenant, _, _ := unstructured.NestedString(bundleObject.Object, "spec", "governance", "logicalTenant")
+	if strings.TrimSpace(logicalTenant) == "" {
+		http.Error(w, "Capability bundle has no logical tenant", http.StatusBadRequest)
+		return
+	}
+	if _, ok := g.requireAdminTenant(w, r, logicalTenant); !ok {
 		return
 	}
 	policyRevision, err := templatePolicyRevision(bundleObject)

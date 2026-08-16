@@ -9,12 +9,17 @@ import (
 )
 
 func TestNormalizeTarget(t *testing.T) {
-	target, err := NormalizeTarget("cachew", "get", "Example.COM", "/repo/info/refs?service=git-upload-pack")
+	target, err := NormalizeTarget("cachew", "get", "Example.COM", "/repo/info/refs")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if target.Method != "GET" || target.Host != "example.com" || target.Path != "/repo/info/refs" {
 		t.Fatalf("target = %#v", target)
+	}
+	for _, path := range []string{"/repo/info/refs?service=git-upload-pack", "/repo/info/refs#fragment"} {
+		if _, err := NormalizePath(path); err == nil {
+			t.Fatalf("NormalizePath(%q) succeeded", path)
+		}
 	}
 	for _, host := range []string{"https://example.com", "example.com:8443", "example.com:bad", "bad host"} {
 		if _, err := NormalizeHost(host); err == nil {
@@ -37,6 +42,11 @@ func TestValidateAccessRequestSpec(t *testing.T) {
 	spec.RequestedDurationSeconds = int32(MaximumRequestedDuration.Seconds()) + 1
 	if err := ValidateAccessRequestSpec(spec); err == nil {
 		t.Fatal("duration over maximum was accepted")
+	}
+	spec = validAccessRequestSpec()
+	spec.Path = "/repo/info/refs?service=git-upload-pack"
+	if err := ValidateAccessRequestSpec(spec); err == nil {
+		t.Fatal("query-bearing target was accepted")
 	}
 	spec = validAccessRequestSpec()
 	spec.Requester.ObjectID = "not-an-object-id"

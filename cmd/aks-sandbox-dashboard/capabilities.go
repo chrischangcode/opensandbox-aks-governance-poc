@@ -43,6 +43,9 @@ func (g *governanceDashboard) createCapabilityBundle(w http.ResponseWriter, r *h
 		http.Error(w, "Capability boundary fields are invalid", http.StatusBadRequest)
 		return
 	}
+	if _, ok := g.requireAdminTenant(w, r, logicalTenant); !ok {
+		return
+	}
 
 	egress, err := parseExactEgressRules(form.Get("egressRules"))
 	if err != nil {

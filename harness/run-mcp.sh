@@ -8,16 +8,21 @@ forward_pids=()
 forward_port=""
 assignmentd_token_file=""
 token_refresh_pid=""
-cleanup() {
-  for pid in "${forward_pids[@]}"; do
-    kill "$pid" 2>/dev/null || true
-  done
-  if [[ -n "$token_refresh_pid" ]]; then
-    kill "$token_refresh_pid" 2>/dev/null || true
-  fi
+cleanup_assignmentd_token_file() {
   if [[ -n "$assignmentd_token_file" ]]; then
     rm -f "$assignmentd_token_file" "${assignmentd_token_file}.next"
   fi
+}
+cleanup() {
+  if [[ -n "$token_refresh_pid" ]]; then
+    kill "$token_refresh_pid" 2>/dev/null || true
+    wait "$token_refresh_pid" 2>/dev/null || true
+    token_refresh_pid=""
+  fi
+  cleanup_assignmentd_token_file
+  for pid in "${forward_pids[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
 }
 trap cleanup EXIT INT TERM
 
@@ -59,10 +64,15 @@ export CREDENTIAL_BROKER_URL="http://127.0.0.1:${forward_port}/broker"
 assignmentd_token_file="$(mktemp)"
 refresh_assignmentd_token() {
   local next_file="${assignmentd_token_file}.next"
-  kubectl --kubeconfig "$KUBECONFIG" -n aks-sandbox-system create token assignmentd-harness \
-    --audience aks-sandbox-lifecycle --duration 15m >"$next_file"
+  rm -f "$next_file"
+  (
+    umask 077
+    kubectl --kubeconfig "$KUBECONFIG" -n aks-sandbox-system create token assignmentd-harness \
+      --audience aks-sandbox-lifecycle --duration 15m >"$next_file"
+  )
   chmod 600 "$next_file"
   mv -f "$next_file" "$assignmentd_token_file"
+  chmod 600 "$assignmentd_token_file"
 }
 refresh_assignmentd_token
 (

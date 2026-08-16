@@ -79,6 +79,11 @@ func run(args []string, logger *slog.Logger) error {
 			logger.Error("close OpenSandbox dashboard client", slog.Any("error", err))
 		}
 	}()
+	requesterAuthorizer, err := newRequesterLifecycleAuthorizer(governanceClient, client, cfg)
+	if err != nil {
+		return fmt.Errorf("create dashboard requester authorizer: %w", err)
+	}
+	authorizedClient := requesterAuthorizer.WrapClient(client)
 
 	rootContext, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -98,7 +103,7 @@ func run(args []string, logger *slog.Logger) error {
 		return err
 	}
 
-	app, err := dashboard.New(client, dashboard.Options{
+	app, err := dashboard.New(authorizedClient, dashboard.Options{
 		BasePath:     cfg.basePath,
 		SandboxImage: cfg.sandboxImage,
 		Context:      rootContext,
@@ -115,7 +120,7 @@ func run(args []string, logger *slog.Logger) error {
 
 	server := &http.Server{
 		Addr:              cfg.listenAddress,
-		Handler:           auth.Middleware(app.Handler()),
+		Handler:           auth.Middleware(requesterAuthorizer.Middleware(app.Handler())),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

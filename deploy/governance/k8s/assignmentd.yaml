@@ -145,6 +145,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: assignmentd
+          # Render ASSIGNMENTD_IMAGE through scripts/render-assignmentd.sh so it stays digest-pinned.
           image: ${ASSIGNMENTD_IMAGE}
           imagePullPolicy: IfNotPresent
           args: [--leader-elect=true]
@@ -172,6 +173,12 @@ spec:
                 secretKeyRef:
                   name: assignmentd-credential-broker
                   key: signing-key
+                  optional: true
+            - name: ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: assignmentd-credential-broker
+                  key: previous-signing-key
                   optional: true
           ports:
             - {name: grpc-authz, containerPort: 9001}

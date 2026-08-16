@@ -135,6 +135,7 @@ func TestCheckRejectsMalformedRequestsBeforeChecker(t *testing.T) {
 		"missing backend":  checkRequestWithoutBackend(),
 		"missing identity": checkRequestWithoutIdentity(),
 		"explicit port":    checkRequestWithExplicitPort(),
+		"query string":     checkRequestWithQuery(),
 		"missing HTTP": {
 			Attributes: &authv3.AttributeContext{
 				ContextExtensions: map[string]string{BackendContextKey: "goproxy"},
@@ -208,7 +209,7 @@ func checkRequest() *authv3.CheckRequest {
 				Http: &authv3.AttributeContext_HttpRequest{
 					Method: "GET",
 					Host:   "example.test",
-					Path:   "/repos?q=test",
+					Path:   "/repos",
 					Headers: map[string]string{
 						IdentityHeader: "sensitive-token",
 						"API-Key":      "client-key",
@@ -235,5 +236,11 @@ func checkRequestWithoutIdentity() *authv3.CheckRequest {
 func checkRequestWithExplicitPort() *authv3.CheckRequest {
 	r := checkRequest()
 	r.Attributes.Request.Http.Host = "example.test:8443"
+	return r
+}
+
+func checkRequestWithQuery() *authv3.CheckRequest {
+	r := checkRequest()
+	r.Attributes.Request.Http.Path = "/repos?q=test"
 	return r
 }

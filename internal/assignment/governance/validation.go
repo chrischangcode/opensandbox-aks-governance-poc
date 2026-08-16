@@ -97,14 +97,11 @@ func NormalizeHost(authority string) (string, error) {
 	return host, nil
 }
 
-// NormalizePath removes query and fragment data while preserving the exact
-// escaped path bytes used by the gateway.
+// NormalizePath preserves the exact escaped path bytes used by the gateway and
+// rejects query or fragment data that the current policy model cannot scope.
 func NormalizePath(value string) (string, error) {
-	if before, _, found := strings.Cut(value, "?"); found {
-		value = before
-	}
-	if before, _, found := strings.Cut(value, "#"); found {
-		value = before
+	if strings.ContainsAny(value, "?#") {
+		return "", errors.New("path must not contain query or fragment")
 	}
 	if value == "" {
 		value = "/"

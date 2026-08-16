@@ -52,8 +52,12 @@ admin_bundle_name="demo-web-reader-$run_suffix"
 admin_template_name="demo-python-web-reader-$run_suffix"
 admin_bundle_created=false
 admin_template_created=false
-assignmentd_token_file="$output_dir/assignmentd-token"
+assignmentd_token_file="$(mktemp)"
 forced_egress_policy_applied=false
+
+cleanup_assignmentd_token_file() {
+  rm -f "$assignmentd_token_file" "${assignmentd_token_file}.next"
+}
 
 delete_sandbox_and_wait() {
   local id="$1"
@@ -131,6 +135,7 @@ cleanup() {
     kill "$pid" 2>/dev/null || true
   done
   wait "${pids[@]}" 2>/dev/null || true
+  cleanup_assignmentd_token_file
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
@@ -311,8 +316,12 @@ kubectl apply -f deploy/governance/k8s/tenant-policies.yaml
 kubectl apply -f deploy/governance/k8s/harness-serviceaccount.yaml
 kubectl apply -f deploy/governance/k8s/principal-bindings.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-serviceaccount.yaml
-kubectl -n "$assignment_namespace" create token assignmentd-harness \
-  --audience aks-sandbox-lifecycle --duration 1h >"$assignmentd_token_file"
+cleanup_assignmentd_token_file
+(
+  umask 077
+  kubectl -n "$assignment_namespace" create token assignmentd-harness \
+    --audience aks-sandbox-lifecycle --duration 1h >"$assignmentd_token_file"
+)
 chmod 600 "$assignmentd_token_file"
 kubectl rollout status deployment/assignmentd \
   -n "$assignment_namespace" --timeout=180s
@@ -441,6 +450,11 @@ kubectl -n "$assignment_namespace" get sandboxtemplates \
   -o custom-columns='NAME:.metadata.name,CAPABILITY:.spec.capabilityBundleRef.name,IMAGE:.spec.image,ENABLED:.spec.enabled'
 
 if [[ "$run_opencode" == "true" ]]; then
+  if [[ "$(jq -r '.mcp.sandbox_governance.enabled' opencode.json 2>/dev/null || echo false)" != "true" ]]; then
+    echo "OpenCode sandbox_governance MCP is disabled by default. Review harness/run-mcp.sh and harness/server.py, then opt in locally by setting opencode.json mcp.sandbox_governance.enabled=true before rerunning with RUN_OPENCODE=true." >&2
+    exit 1
+  fi
+
   echo "==> OpenCode MCP connection"
   opencode mcp list | tee "$output_dir/opencode-mcp.txt"
 
