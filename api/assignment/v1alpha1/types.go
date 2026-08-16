@@ -28,6 +28,10 @@ const (
 	DecisionSourceAccessRequest SandboxEgressDecisionSource = "access-request"
 	// DecisionSourceDeny means no immutable or temporary authority allowed the request.
 	DecisionSourceDeny SandboxEgressDecisionSource = "deny"
+
+	ValidationRunRunning   SandboxValidationRunState = "Running"
+	ValidationRunSucceeded SandboxValidationRunState = "Succeeded"
+	ValidationRunFailed    SandboxValidationRunState = "Failed"
 )
 
 // GroupVersion identifies this API package.
@@ -76,7 +80,8 @@ type AgentgatewayBackendPolicy struct {
 
 // HarnessPolicy contains command rules enforced by an external Tool Bridge.
 type HarnessPolicy struct {
-	CommandPolicy []CommandPolicyRule `json:"commandPolicy,omitempty"`
+	CommandPolicy   []CommandPolicyRule `json:"commandPolicy,omitempty"`
+	ValidationRules []ValidationRule    `json:"validationRules,omitempty"`
 }
 
 // CommandPolicyRule classifies one anchored exact-literal command string.
@@ -84,6 +89,12 @@ type CommandPolicyRule struct {
 	Pattern  string `json:"pattern"`
 	Decision string `json:"decision"`
 	Reason   string `json:"reason,omitempty"`
+}
+
+// ValidationRule selects one exact pre-authorized command for changed paths.
+type ValidationRule struct {
+	PathPrefix string `json:"pathPrefix"`
+	Command    string `json:"command"`
 }
 
 // SandboxTemplate is an immutable administrator-approved sandbox shape.
@@ -118,6 +129,36 @@ type SandboxTemplateSpec struct {
 type SandboxTemplateResources struct {
 	CPU    string `json:"cpu"`
 	Memory string `json:"memory"`
+}
+
+// SandboxTenantPolicy defines one immutable logical-tenant admission budget.
+// +kubebuilder:object:root=true
+type SandboxTenantPolicy struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              SandboxTenantPolicySpec `json:"spec"`
+}
+
+// SandboxTenantPolicyList is a list of SandboxTenantPolicy resources.
+// +kubebuilder:object:root=true
+type SandboxTenantPolicyList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []SandboxTenantPolicy `json:"items"`
+}
+
+// SandboxTenantPolicySpec limits one logical tenant within the shared AKS tenant.
+type SandboxTenantPolicySpec struct {
+	LogicalTenant                   string   `json:"logicalTenant"`
+	WorkloadNamespace               string   `json:"workloadNamespace"`
+	AllowedCapabilityBundles        []string `json:"allowedCapabilityBundles"`
+	AllowedCapabilityBundlePrefixes []string `json:"allowedCapabilityBundlePrefixes,omitempty"`
+	MaxConcurrentSandboxes          int32    `json:"maxConcurrentSandboxes"`
+	MaxLifetimeSeconds              int32    `json:"maxLifetimeSeconds"`
+	MaxAccessRequestDurationSeconds int32    `json:"maxAccessRequestDurationSeconds"`
+	MaxCPU                          string   `json:"maxCpu"`
+	MaxMemory                       string   `json:"maxMemory"`
+	Enabled                         bool     `json:"enabled"`
 }
 
 // SandboxAssignment binds one capability bundle to one sandbox Pod incarnation.
@@ -194,6 +235,7 @@ type SandboxAccessRequestList struct {
 // SandboxAccessRequestSpec binds a request to one assignment and exact egress target.
 type SandboxAccessRequestSpec struct {
 	AssignmentRef            AssignmentReference `json:"assignmentRef"`
+	PodUID                   types.UID           `json:"podUid"`
 	BasePolicyRevision       string              `json:"basePolicyRevision"`
 	Backend                  string              `json:"backend"`
 	Method                   string              `json:"method"`
@@ -272,14 +314,106 @@ type SandboxEgressEventSpec struct {
 	AccessRequestName        string                      `json:"accessRequestName,omitempty"`
 }
 
+// SandboxValidationRun is durable, credential-free evidence from one
+// sandbox-only source validation.
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type SandboxValidationRun struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              SandboxValidationRunSpec   `json:"spec"`
+	Status            SandboxValidationRunStatus `json:"status,omitempty"`
+}
+
+// SandboxValidationRunList is a list of SandboxValidationRun resources.
+// +kubebuilder:object:root=true
+type SandboxValidationRunList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []SandboxValidationRun `json:"items"`
+}
+
+// SandboxValidationRunSpec binds selected tests to one exact sandbox and policy incarnation.
+type SandboxValidationRunSpec struct {
+	TaskID                   string              `json:"taskId"`
+	Repository               string              `json:"repository"`
+	SourceRevision           string              `json:"sourceRevision"`
+	ChangedPaths             []string            `json:"changedPaths"`
+	SelectedCommands         []string            `json:"selectedCommands"`
+	TemplateName             string              `json:"templateName"`
+	AssignmentRef            AssignmentReference `json:"assignmentRef"`
+	PodUID                   types.UID           `json:"podUid"`
+	SandboxID                string              `json:"sandboxId"`
+	CapabilityBundleName     string              `json:"capabilityBundleName"`
+	CapabilityBundleRevision string              `json:"capabilityBundleRevision"`
+	StartedAt                metav1.Time         `json:"startedAt"`
+}
+
+// SandboxValidationRunState is the terminal state of one validation.
+type SandboxValidationRunState string
+
+// SandboxValidationCommandResult stores hashes rather than unrestricted logs.
+type SandboxValidationCommandResult struct {
+	Command      string `json:"command"`
+	ExitCode     int32  `json:"exitCode"`
+	StdoutSHA256 string `json:"stdoutSha256"`
+	StderrSHA256 string `json:"stderrSha256"`
+}
+
+// SandboxValidationRunStatus contains attested validation results and cleanup state.
+type SandboxValidationRunStatus struct {
+	State       SandboxValidationRunState        `json:"state,omitempty"`
+	CompletedAt *metav1.Time                     `json:"completedAt,omitempty"`
+	Results     []SandboxValidationCommandResult `json:"results,omitempty"`
+	CleanedUp   bool                             `json:"cleanedUp,omitempty"`
+	Message     string                           `json:"message,omitempty"`
+}
+
+// SandboxCredentialEvent is a credential-free audit event for one broker grant.
+// +kubebuilder:object:root=true
+type SandboxCredentialEvent struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              SandboxCredentialEventSpec `json:"spec"`
+}
+
+// SandboxCredentialEventList is a list of SandboxCredentialEvent resources.
+// +kubebuilder:object:root=true
+type SandboxCredentialEventList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []SandboxCredentialEvent `json:"items"`
+}
+
+// SandboxCredentialEventSpec excludes the credential and request contents.
+type SandboxCredentialEventSpec struct {
+	Timestamp                metav1.Time         `json:"timestamp"`
+	GrantID                  string              `json:"grantId"`
+	Action                   string              `json:"action"`
+	TaskID                   string              `json:"taskId"`
+	AssignmentRef            AssignmentReference `json:"assignmentRef"`
+	PodUID                   types.UID           `json:"podUid"`
+	SandboxID                string              `json:"sandboxId"`
+	CapabilityBundleName     string              `json:"capabilityBundleName"`
+	CapabilityBundleRevision string              `json:"capabilityBundleRevision"`
+	Backend                  string              `json:"backend"`
+	Method                   string              `json:"method"`
+	Host                     string              `json:"host"`
+	Path                     string              `json:"path"`
+	ExpiresAt                metav1.Time         `json:"expiresAt"`
+}
+
 // AddToScheme registers assignment resources in a runtime Scheme.
 func AddToScheme(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(GroupVersion,
 		&CapabilityBundle{}, &CapabilityBundleList{},
 		&SandboxTemplate{}, &SandboxTemplateList{},
+		&SandboxTenantPolicy{}, &SandboxTenantPolicyList{},
 		&SandboxAssignment{}, &SandboxAssignmentList{},
 		&SandboxAccessRequest{}, &SandboxAccessRequestList{},
 		&SandboxEgressEvent{}, &SandboxEgressEventList{},
+		&SandboxValidationRun{}, &SandboxValidationRunList{},
+		&SandboxCredentialEvent{}, &SandboxCredentialEventList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

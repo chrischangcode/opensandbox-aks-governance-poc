@@ -30,11 +30,14 @@ import (
 const governanceBodyLimit = 16 << 10
 
 var (
-	dashboardAssignmentsGVR = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxassignments"}
-	dashboardBundlesGVR     = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "capabilitybundles"}
-	dashboardRequestsGVR    = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxaccessrequests"}
-	dashboardEventsGVR      = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxegressevents"}
-	dashboardTemplatesGVR   = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxtemplates"}
+	dashboardAssignmentsGVR    = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxassignments"}
+	dashboardBundlesGVR        = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "capabilitybundles"}
+	dashboardRequestsGVR       = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxaccessrequests"}
+	dashboardEventsGVR         = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxegressevents"}
+	dashboardTemplatesGVR      = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxtemplates"}
+	dashboardCredentialsGVR    = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxcredentialevents"}
+	dashboardValidationsGVR    = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxvalidationruns"}
+	dashboardTenantPoliciesGVR = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxtenantpolicies"}
 )
 
 type governanceDashboard struct {
@@ -67,6 +70,20 @@ type requestPageRow struct {
 	RequestedMinutes                                                      int32
 }
 
+type credentialPageRow struct {
+	Timestamp, Action, GrantID, TaskID, SandboxID, Assignment, Target, ExpiresAt string
+}
+
+type validationPageRow struct {
+	Name, State, TaskID, Repository, Revision, SandboxID, Assignment string
+	Template, Commands, Results, CleanedUp, Message                  string
+}
+
+type tenantPolicyPageRow struct {
+	Name, LogicalTenant, WorkloadNamespace, Bundles, Concurrent string
+	Lifetime, Access, CPU, Memory, Enabled                      string
+}
+
 type accessPageData struct {
 	BasePath, IdentityName, CSRFToken, Message string
 	IsAdmin                                    bool
@@ -81,6 +98,16 @@ type adminPageData struct {
 	Assignments                                []assignmentPageRow
 	Bundles                                    []bundlePageRow
 	Events                                     []eventPageRow
+	Credentials                                []credentialPageRow
+	Validations                                []validationPageRow
+	TenantPolicies                             []tenantPolicyPageRow
+}
+
+type policySimulationPageData struct {
+	BasePath, IdentityName         string
+	DeniedEvents, NewlyAllowed     int
+	AffectedTenants, AffectedTeams string
+	Matches                        []governance.PolicyImpactMatch
 }
 
 func newGovernanceDashboard(client dynamic.Interface, cfg config, logger *slog.Logger) (*governanceDashboard, error) {
@@ -110,9 +137,54 @@ func (g *governanceDashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /access/requests", g.createAccessRequest)
 	mux.HandleFunc("GET /admin", g.adminPage)
 	mux.HandleFunc("POST /admin/bundles", g.createCapabilityBundle)
+	mux.HandleFunc("POST /admin/bundles/simulate", g.simulateCapabilityBundle)
 	mux.HandleFunc("POST /admin/templates", g.createSandboxTemplate)
+	mux.HandleFunc("POST /admin/tenant-policies", g.createTenantPolicy)
 	mux.HandleFunc("POST /admin/requests/{name}/approve", g.approveAccessRequest)
 	mux.HandleFunc("POST /admin/requests/{name}/deny", g.denyAccessRequest)
+}
+
+func (g *governanceDashboard) simulateCapabilityBundle(w http.ResponseWriter, r *http.Request) {
+	identity, ok := g.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	form, ok := g.parseMutation(w, r, "csrf", "egressRules")
+	if !ok {
+		return
+	}
+	targets, err := parseExactEgressTargets(form.Get("egressRules"))
+	if err != nil {
+		http.Error(w, "Invalid candidate egress: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	list, err := g.client.Resource(dashboardEventsGVR).Namespace(g.namespace).List(r.Context(), metav1.ListOptions{})
+	if err != nil {
+		g.internalError(w, r, "list egress events for simulation", err)
+		return
+	}
+	events := make([]assignmentv1alpha1.SandboxEgressEvent, 0, len(list.Items))
+	for i := range list.Items {
+		event := assignmentv1alpha1.SandboxEgressEvent{}
+		if err := fromUnstructured(&list.Items[i], &event); err != nil {
+			g.internalError(w, r, "decode egress event for simulation", err)
+			return
+		}
+		events = append(events, event)
+	}
+	impact := governance.SimulatePolicyImpact(events, targets)
+	g.setPageHeaders(w)
+	if err := policySimulationPageTemplate.Execute(w, policySimulationPageData{
+		BasePath:        g.basePath,
+		IdentityName:    identity.Name,
+		DeniedEvents:    impact.DeniedEvents,
+		NewlyAllowed:    impact.NewlyAllowed,
+		AffectedTenants: strings.Join(impact.AffectedTenants, ", "),
+		AffectedTeams:   strings.Join(impact.AffectedTeams, ", "),
+		Matches:         impact.Matches,
+	}); err != nil {
+		g.internalError(w, r, "render policy simulation", err)
+	}
 }
 
 func (g *governanceDashboard) accessPage(w http.ResponseWriter, r *http.Request) {
@@ -180,17 +252,35 @@ func (g *governanceDashboard) adminPage(w http.ResponseWriter, r *http.Request) 
 		g.internalError(w, r, "list egress events", err)
 		return
 	}
+	credentials, err := g.credentialRows(r.Context())
+	if err != nil {
+		g.internalError(w, r, "list credential events", err)
+		return
+	}
+	validations, err := g.validationRows(r.Context())
+	if err != nil {
+		g.internalError(w, r, "list validation runs", err)
+		return
+	}
+	tenantPolicies, err := g.tenantPolicyRows(r.Context())
+	if err != nil {
+		g.internalError(w, r, "list tenant policies", err)
+		return
+	}
 	g.setPageHeaders(w)
 	if err := adminPageTemplate.Execute(w, adminPageData{
-		BasePath:     g.basePath,
-		IdentityName: identity.Name,
-		CSRFToken:    csrf,
-		Message:      r.URL.Query().Get("message"),
-		Templates:    templates,
-		Requests:     requests,
-		Assignments:  assignments,
-		Bundles:      bundles,
-		Events:       events,
+		BasePath:       g.basePath,
+		IdentityName:   identity.Name,
+		CSRFToken:      csrf,
+		Message:        r.URL.Query().Get("message"),
+		Templates:      templates,
+		Requests:       requests,
+		Assignments:    assignments,
+		Bundles:        bundles,
+		Events:         events,
+		Credentials:    credentials,
+		Validations:    validations,
+		TenantPolicies: tenantPolicies,
 	}); err != nil {
 		g.internalError(w, r, "render admin page", err)
 	}
@@ -242,6 +332,15 @@ func (g *governanceDashboard) createAccessRequest(w http.ResponseWriter, r *http
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	maxAccessSeconds, err := g.maxAccessDurationSeconds(r.Context(), event.Spec.LogicalTenant)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if duration > time.Duration(maxAccessSeconds)*time.Second {
+		http.Error(w, "Requested duration exceeds the tenant access budget", http.StatusBadRequest)
+		return
+	}
 	requester := assignmentv1alpha1.GovernanceIdentity{
 		TenantID:      identity.TenantID,
 		ObjectID:      identity.ObjectID,
@@ -251,6 +350,7 @@ func (g *governanceDashboard) createAccessRequest(w http.ResponseWriter, r *http
 	}
 	spec := assignmentv1alpha1.SandboxAccessRequestSpec{
 		AssignmentRef:            event.Spec.AssignmentRef,
+		PodUID:                   event.Spec.PodUID,
 		BasePolicyRevision:       event.Spec.CapabilityBundleRevision,
 		Backend:                  target.Backend,
 		Method:                   target.Method,
@@ -338,6 +438,31 @@ func (g *governanceDashboard) approveAccessRequest(w http.ResponseWriter, r *htt
 	}
 	if err := g.validateRequestAssignment(r.Context(), request); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	assignmentObject, err := g.client.Resource(dashboardAssignmentsGVR).Namespace(g.namespace).Get(
+		r.Context(), request.Spec.AssignmentRef.Name, metav1.GetOptions{},
+	)
+	if err != nil {
+		g.resourceError(w, "get request assignment", err)
+		return
+	}
+	bundleName, _, _ := unstructured.NestedString(assignmentObject.Object, "spec", "capabilityBundleRef", "name")
+	bundleObject, err := g.client.Resource(dashboardBundlesGVR).Namespace(g.namespace).Get(
+		r.Context(), bundleName, metav1.GetOptions{},
+	)
+	if err != nil {
+		g.resourceError(w, "get request capability bundle", err)
+		return
+	}
+	logicalTenant, _, _ := unstructured.NestedString(bundleObject.Object, "spec", "governance", "logicalTenant")
+	maxAccessSeconds, err := g.maxAccessDurationSeconds(r.Context(), logicalTenant)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if duration > time.Duration(maxAccessSeconds)*time.Second {
+		http.Error(w, "Approved duration exceeds the tenant access budget", http.StatusBadRequest)
 		return
 	}
 	approver, err := governanceIdentity(identity, "", "")
@@ -690,6 +815,7 @@ func (g *governanceDashboard) requestRows(ctx context.Context) ([]requestPageRow
 	if err != nil {
 		return nil, err
 	}
+
 	requests := make([]assignmentv1alpha1.SandboxAccessRequest, 0, len(list.Items))
 	for i := range list.Items {
 		request := assignmentv1alpha1.SandboxAccessRequest{}
@@ -726,6 +852,80 @@ func (g *governanceDashboard) requestRows(ctx context.Context) ([]requestPageRow
 			row.ExpiresAt = request.Status.ExpiresAt.Time.UTC().Format(time.RFC3339)
 		}
 		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+func (g *governanceDashboard) credentialRows(ctx context.Context) ([]credentialPageRow, error) {
+	list, err := g.client.Resource(dashboardCredentialsGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	events := make([]assignmentv1alpha1.SandboxCredentialEvent, 0, len(list.Items))
+	for i := range list.Items {
+		event := assignmentv1alpha1.SandboxCredentialEvent{}
+		if err := fromUnstructured(&list.Items[i], &event); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	slices.SortFunc(events, func(a, b assignmentv1alpha1.SandboxCredentialEvent) int {
+		return b.Spec.Timestamp.Time.Compare(a.Spec.Timestamp.Time)
+	})
+	if len(events) > 100 {
+		events = events[:100]
+	}
+	rows := make([]credentialPageRow, 0, len(events))
+	for _, event := range events {
+		rows = append(rows, credentialPageRow{
+			Timestamp:  event.Spec.Timestamp.Time.UTC().Format(time.RFC3339),
+			Action:     event.Spec.Action,
+			GrantID:    event.Spec.GrantID,
+			TaskID:     event.Spec.TaskID,
+			SandboxID:  event.Spec.SandboxID,
+			Assignment: event.Spec.AssignmentRef.Name,
+			Target:     event.Spec.Method + " " + event.Spec.Backend + "://" + event.Spec.Host + event.Spec.Path,
+			ExpiresAt:  event.Spec.ExpiresAt.Time.UTC().Format(time.RFC3339),
+		})
+	}
+	return rows, nil
+}
+
+func (g *governanceDashboard) validationRows(ctx context.Context) ([]validationPageRow, error) {
+	list, err := g.client.Resource(dashboardValidationsGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	runs := make([]assignmentv1alpha1.SandboxValidationRun, 0, len(list.Items))
+	for i := range list.Items {
+		run := assignmentv1alpha1.SandboxValidationRun{}
+		if err := fromUnstructured(&list.Items[i], &run); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	slices.SortFunc(runs, func(a, b assignmentv1alpha1.SandboxValidationRun) int {
+		return b.Spec.StartedAt.Time.Compare(a.Spec.StartedAt.Time)
+	})
+	if len(runs) > 100 {
+		runs = runs[:100]
+	}
+	rows := make([]validationPageRow, 0, len(runs))
+	for _, run := range runs {
+		rows = append(rows, validationPageRow{
+			Name:       run.Name,
+			State:      string(run.Status.State),
+			TaskID:     run.Spec.TaskID,
+			Repository: run.Spec.Repository,
+			Revision:   run.Spec.SourceRevision,
+			SandboxID:  run.Spec.SandboxID,
+			Assignment: run.Spec.AssignmentRef.Name,
+			Template:   run.Spec.TemplateName,
+			Commands:   strconv.Itoa(len(run.Spec.SelectedCommands)),
+			Results:    strconv.Itoa(len(run.Status.Results)),
+			CleanedUp:  strconv.FormatBool(run.Status.CleanedUp),
+			Message:    run.Status.Message,
+		})
 	}
 	return rows, nil
 }
@@ -854,6 +1054,18 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 <title>Sandbox governance admin</title><style>` + governanceStyles + `</style></head><body>
 <nav><a href="{{.BasePath}}/">Sandbox dashboard</a><a href="{{.BasePath}}/access">Access</a><a href="{{.BasePath}}/admin">Admin</a><span>{{.IdentityName}}</span></nav>
 <main><h1>Sandbox governance admin <small>POC</small></h1>{{if .Message}}<p class="message">{{.Message}}</p>{{end}}
+<section id="tenant-policies"><h2>Tenant policies and budgets</h2><table><thead><tr><th>Policy</th><th>Boundary</th><th>Allowed bundles</th><th>Budgets</th><th>Enabled</th></tr></thead><tbody>
+{{range .TenantPolicies}}<tr><td><code>{{.Name}}</code></td><td>{{.LogicalTenant}}<br>{{.WorkloadNamespace}}</td><td>{{.Bundles}}</td><td>{{.Concurrent}} concurrent<br>{{.Lifetime}} lifetime / {{.Access}} access<br>{{.CPU}} CPU / {{.Memory}}</td><td>{{.Enabled}}</td></tr>{{else}}<tr><td colspan="5">No tenant policies found. Sandbox creation fails closed without one enabled policy per logical tenant.</td></tr>{{end}}</tbody></table>
+<h3>Create immutable tenant policy revision</h3><form method="post" action="{{.BasePath}}/admin/tenant-policies"><input type="hidden" name="csrf" value="{{.CSRFToken}}">
+<label>Name<input name="name" maxlength="63" required></label><label>Logical tenant<input name="logicalTenant" maxlength="63" value="tenant-a" required></label>
+<label>Workload namespace<input name="workloadNamespace" maxlength="63" value="opensandbox" required></label>
+<label>Allowed capability bundles<textarea name="allowedCapabilityBundles" maxlength="8192" placeholder="team-a-reader&#10;team-a-harness-reader-v1"></textarea></label>
+<label>Allowed bundle prefixes<textarea name="allowedCapabilityBundlePrefixes" maxlength="4096" placeholder="demo-"></textarea></label>
+<label>Maximum concurrent sandboxes<input name="maxConcurrentSandboxes" type="number" min="1" max="1000" value="4" required></label>
+<label>Maximum lifetime seconds<input name="maxLifetimeSeconds" type="number" min="60" max="86400" value="3600" required></label>
+<label>Maximum access duration minutes<input name="maxAccessMinutes" type="number" min="1" max="480" value="60" required></label>
+<label>Maximum CPU<input name="maxCpu" value="2" maxlength="32" required></label><label>Maximum memory<input name="maxMemory" value="2Gi" maxlength="32" required></label>
+<label>Enabled<select name="enabled"><option value="true">true</option><option value="false">false</option></select></label><button type="submit">Create tenant policy</button></form></section>
 <section id="capability-boundaries"><h2>Capability boundaries</h2><table><thead><tr><th>Bundle</th><th>Boundary</th><th>Logical tenant / team</th><th>Permission</th><th>Pre-authorized capabilities</th></tr></thead><tbody>
 {{range .Bundles}}<tr><td>{{.Name}}</td><td>{{.Boundary}}</td><td>{{.LogicalTenant}} / {{.Team}}</td><td>{{.Permission}}</td><td>{{if .Egress}}<code>{{.Egress}}</code>{{else}}No external egress{{end}}<br>{{if .Commands}}{{.Commands}}{{else}}No harness commands{{end}}</td></tr>{{else}}<tr><td colspan="5">No bundles found.</td></tr>{{end}}</tbody></table>
 <h3 id="create-capability-boundary">Create immutable capability boundary</h3>
@@ -866,7 +1078,13 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 <label>Permission level<input name="permissionLevel" maxlength="63" value="reader" required></label>
 <label>Pre-authorized external egress<textarea name="egressRules" maxlength="8192" placeholder="external-web GET https://example.com/docs"></textarea></label>
 <label>Allowed exact commands<textarea name="allowedCommands" maxlength="8192" placeholder="uname -a &amp;&amp; python --version"></textarea></label>
+<label>Automatic validation rules<textarea name="validationRules" maxlength="8192" placeholder="internal/ =&gt; go test ./internal/..."></textarea></label>
 <button type="submit">Create capability boundary</button></form></section>
+<section id="policy-simulation"><h2>Policy impact simulation</h2>
+<p>Preview which historical denials an exact candidate boundary would permit before creating it.</p>
+<form method="post" action="{{.BasePath}}/admin/bundles/simulate"><input type="hidden" name="csrf" value="{{.CSRFToken}}">
+<label>Candidate exact egress rules<textarea name="egressRules" maxlength="8192" placeholder="source-control GET https://github.com/org/repo" required></textarea></label>
+<button type="submit">Preview policy impact</button></form></section>
 <section id="approved-templates"><h2>Approved sandbox templates</h2><table><thead><tr><th>Template</th><th>Runtime</th><th>Capability boundary</th><th>Limits</th><th>Enabled</th></tr></thead><tbody>
 {{range .Templates}}<tr><td><code>{{.Name}}</code><br>{{.DisplayName}}<br>{{.Description}}</td><td>{{.Image}}<br><code>{{.Entrypoint}}</code></td><td>{{.CapabilityBundle}}</td><td>{{.CPU}} / {{.Memory}}<br>{{.Timeout}}</td><td>{{.Enabled}}</td></tr>{{else}}<tr><td colspan="5">No sandbox templates found.</td></tr>{{end}}
 </tbody></table>
@@ -892,4 +1110,19 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!doctype htm
 {{range .Assignments}}<tr><td>{{.Name}}<br>{{.SandboxID}}</td><td>{{.Bundle}}</td><td>{{.Boundary}}</td><td>{{.Permission}}</td><td>{{.Ready}}</td></tr>{{else}}<tr><td colspan="5">No assignments found.</td></tr>{{end}}</tbody></table></section>
 <section id="recent-egress-events"><h2>Recent egress events</h2><table><thead><tr><th>Time / sandbox</th><th>Target</th><th>Decision</th><th>Reason</th></tr></thead><tbody>
 {{range .Events}}<tr><td>{{.Timestamp}}<br>{{.SandboxID}}</td><td><code>{{.Method}} {{.Backend}}://{{.Host}}{{.Path}}</code></td><td>{{.Allowed}} / {{.Source}}<br>{{.AccessRequest}}</td><td>{{.Reason}}</td></tr>{{else}}<tr><td colspan="4">No egress events found.</td></tr>{{end}}</tbody></table></section>
+<section id="validation-evidence"><h2>Sandbox validation evidence</h2><table><thead><tr><th>Run / task</th><th>Source</th><th>Sandbox boundary</th><th>Evidence</th></tr></thead><tbody>
+{{range .Validations}}<tr><td><code>{{.Name}}</code><br>{{.State}} / {{.TaskID}}</td><td>{{.Repository}}<br><code>{{.Revision}}</code></td><td>{{.SandboxID}}<br>{{.Assignment}}<br>{{.Template}}</td><td>{{.Commands}} selected command(s), {{.Results}} result hash(es)<br>cleanup={{.CleanedUp}}<br>{{.Message}}</td></tr>{{else}}<tr><td colspan="4">No validation evidence found.</td></tr>{{end}}</tbody></table></section>
+<section id="credential-audit"><h2>Brokered credential audit</h2><table><thead><tr><th>Time / action</th><th>Task / grant</th><th>Sandbox</th><th>Exact scope / expiry</th></tr></thead><tbody>
+{{range .Credentials}}<tr><td>{{.Timestamp}}<br>{{.Action}}</td><td>{{.TaskID}}<br><code>{{.GrantID}}</code></td><td>{{.SandboxID}}<br>{{.Assignment}}</td><td><code>{{.Target}}</code><br>{{.ExpiresAt}}</td></tr>{{else}}<tr><td colspan="4">No credential events found.</td></tr>{{end}}</tbody></table></section>
 </main></body></html>`))
+
+var policySimulationPageTemplate = template.Must(template.New("policy-simulation").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandbox policy impact</title><style>` + governanceStyles + `</style></head><body>
+<nav><a href="{{.BasePath}}/admin">Back to administration</a><span>{{.IdentityName}}</span></nav>
+<main><h1>Policy impact simulation <small>non-mutating</small></h1>
+<section><h2>Summary</h2><p><strong>{{.NewlyAllowed}}</strong> of {{.DeniedEvents}} historical denials would become allowed.</p>
+<p>Affected logical tenants: {{if .AffectedTenants}}{{.AffectedTenants}}{{else}}none{{end}}<br>Affected teams: {{if .AffectedTeams}}{{.AffectedTeams}}{{else}}none{{end}}</p></section>
+<section><h2>Exact matches</h2><table><thead><tr><th>Event</th><th>Sandbox / assignment</th><th>Boundary</th><th>Exact target</th></tr></thead><tbody>
+{{range .Matches}}<tr><td><code>{{.EventName}}</code></td><td>{{.SandboxID}}<br>{{.Assignment}}</td><td>{{.LogicalTenant}} / {{.Team}}</td><td><code>{{.Target.Method}} {{.Target.Backend}}://{{.Target.Host}}{{.Target.Path}}</code></td></tr>{{else}}<tr><td colspan="4">No historical denied event matches this exact candidate policy.</td></tr>{{end}}
+</tbody></table></section></main></body></html>`))

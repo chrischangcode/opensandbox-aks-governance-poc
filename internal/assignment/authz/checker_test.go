@@ -170,6 +170,7 @@ func TestMatchAccessGrantExactStaleExpiredAndAmbiguous(t *testing.T) {
 	now := time.Now().UTC()
 	decision := Decision{
 		AssignmentName: "assignment-a", AssignmentUID: "assignment-uid",
+		PodUID:                   "pod-uid",
 		CapabilityBundleRevision: "sha256:0123456789",
 		Backend:                  "goproxy", Method: "GET", Host: "cachew.example.test", Path: "/module",
 	}
@@ -184,6 +185,12 @@ func TestMatchAccessGrantExactStaleExpiredAndAmbiguous(t *testing.T) {
 	_ = unstructured.SetNestedField(stale.Object, "sha256:stale", "spec", "basePolicyRevision")
 	if _, _, granted, err := matchAccessGrantObjects([]any{stale}, decision, now); err != nil || granted {
 		t.Fatalf("stale grant = granted=%v err=%v", granted, err)
+	}
+
+	resumed := exact.DeepCopy()
+	_ = unstructured.SetNestedField(resumed.Object, "old-pod-uid", "spec", "podUid")
+	if _, _, granted, err := matchAccessGrantObjects([]any{resumed}, decision, now); err != nil || granted {
+		t.Fatalf("resumed Pod grant = granted=%v err=%v", granted, err)
 	}
 
 	expired := accessRequestUnstructured(t, accessRequestObject(t, "access-expired", decision.CapabilityBundleRevision, now.Add(-time.Minute)))
@@ -223,6 +230,7 @@ func accessRequestObject(t *testing.T, name, revision string, expiresAt time.Tim
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "aks-sandbox-system"},
 		Spec: assignmentv1alpha1.SandboxAccessRequestSpec{
 			AssignmentRef:            assignmentv1alpha1.AssignmentReference{Name: "assignment-a", UID: types.UID("assignment-uid")},
+			PodUID:                   types.UID("pod-uid"),
 			BasePolicyRevision:       revision,
 			Backend:                  "goproxy",
 			Method:                   "GET",

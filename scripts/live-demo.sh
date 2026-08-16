@@ -288,6 +288,7 @@ echo "==> Applying immutable governance definitions"
 kubectl apply -f deploy/governance/k8s/crds.yaml
 kubectl apply -f deploy/governance/k8s/capability-bundles.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-templates.yaml
+kubectl apply -f deploy/governance/k8s/tenant-policies.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-serviceaccount.yaml
 kubectl rollout status deployment/assignmentd \
   -n "$assignment_namespace" --timeout=180s

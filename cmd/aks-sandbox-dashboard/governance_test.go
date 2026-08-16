@@ -92,6 +92,7 @@ func TestGovernanceCreatesRequestFromDeniedEventAndAuthenticatedIdentity(t *test
 		t.Fatalf("requester = %+v", request.Spec.Requester)
 	}
 	if request.Spec.AssignmentRef.UID != types.UID("assignment-uid") || request.Spec.BasePolicyRevision != "sha256:0123456789" ||
+		request.Spec.PodUID != types.UID("pod-uid") ||
 		request.Spec.Backend != "cachew" || request.Spec.Method != "GET" || request.Spec.Host != "cachew.example.test" ||
 		request.Spec.Path != "/repo/info/refs" || request.Status.State != assignmentv1alpha1.SandboxAccessRequestPending {
 		t.Fatalf("request = %+v", request)
@@ -171,7 +172,8 @@ func TestGovernanceAdminCreatesCapabilityBundleFromExactRules(t *testing.T) {
 		"csrf": {"csrf"}, "name": {"web-reader-v1"}, "displayName": {"Approved web reader"},
 		"logicalTenant": {"tenant-a"}, "team": {"readers"}, "permissionLevel": {"reader"},
 		"egressRules":     {"external-web GET https://example.com/docs\nexternal-web GET https://example.com/reference"},
-		"allowedCommands": {`uname -a && python --version`},
+		"allowedCommands": {"uname -a && python --version\ngo test ./internal/..."},
+		"validationRules": {"internal/ => go test ./internal/..."},
 	}
 	response := serveGovernance(handler, http.MethodPost, "/admin/bundles", form, admin, "csrf")
 	if response.Code != http.StatusSeeOther {
@@ -191,8 +193,11 @@ func TestGovernanceAdminCreatesCapabilityBundleFromExactRules(t *testing.T) {
 	if !strings.Contains(policy, `request.host == "example.com"`) ||
 		!strings.Contains(policy, `request.path == "/docs"`) ||
 		!strings.Contains(policy, `request.path == "/reference"`) ||
-		len(bundle.Spec.Harness.CommandPolicy) != 1 ||
+		len(bundle.Spec.Harness.CommandPolicy) != 2 ||
 		bundle.Spec.Harness.CommandPolicy[0].Pattern != `^uname -a && python --version$` ||
+		len(bundle.Spec.Harness.ValidationRules) != 1 ||
+		bundle.Spec.Harness.ValidationRules[0].PathPrefix != "internal/" ||
+		bundle.Spec.Harness.ValidationRules[0].Command != "go test ./internal/..." ||
 		bundle.Spec.Governance.DisplayName != "Approved web reader" {
 		t.Fatalf("created bundle = %+v", bundle.Spec)
 	}
@@ -224,6 +229,28 @@ func TestGovernanceCapabilityBundleRejectsExplicitPort(t *testing.T) {
 	response := serveGovernance(handler, http.MethodPost, "/admin/bundles", form, admin, "csrf")
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("create bundle response = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestGovernancePolicySimulationDoesNotCreateBundle(t *testing.T) {
+	governanceDashboard, handler := newGovernanceTestHandler(t, governanceFixtureObjects(t)...)
+	admin := authenticatedIdentity{TenantID: testTenantID, ObjectID: testAdminID, Name: "Administrator", Roles: []string{"OpenSandbox.Admin"}}
+	form := url.Values{
+		"csrf":        {"csrf"},
+		"egressRules": {"cachew GET https://cachew.example.test/repo/info/refs"},
+	}
+	response := serveGovernance(handler, http.MethodPost, "/admin/bundles/simulate", form, admin, "csrf")
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), "1</strong> of 1 historical denials") ||
+		!strings.Contains(response.Body.String(), "tenant-a / team-a") {
+		t.Fatalf("simulation response = %d body=%s", response.Code, response.Body.String())
+	}
+	list, err := governanceDashboard.client.Resource(dashboardBundlesGVR).Namespace("aks-sandbox-system").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("simulation mutated bundles: %d", len(list.Items))
 	}
 }
 
@@ -310,7 +337,18 @@ func governanceFixtureObjects(t *testing.T) []runtime.Object {
 			Allowed: false, Reason: "backend is not granted", DecisionSource: assignmentv1alpha1.DecisionSourceDeny,
 		},
 	}
-	return []runtime.Object{bundle, assignmentObject, event}
+	tenantPolicy := &assignmentv1alpha1.SandboxTenantPolicy{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxTenantPolicy"},
+		ObjectMeta: metav1.ObjectMeta{Name: "tenant-a-v1", Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxTenantPolicySpec{
+			LogicalTenant: "tenant-a", WorkloadNamespace: "opensandbox",
+			AllowedCapabilityBundles: []string{"coding"}, AllowedCapabilityBundlePrefixes: []string{"demo-"},
+			MaxConcurrentSandboxes: 4,
+			MaxLifetimeSeconds:     3600, MaxAccessRequestDurationSeconds: 3600,
+			MaxCPU: "2", MaxMemory: "2Gi", Enabled: true,
+		},
+	}
+	return []runtime.Object{bundle, assignmentObject, event, tenantPolicy}
 }
 
 func pendingDashboardAccessRequest(name string) *assignmentv1alpha1.SandboxAccessRequest {
@@ -319,6 +357,7 @@ func pendingDashboardAccessRequest(name string) *assignmentv1alpha1.SandboxAcces
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "aks-sandbox-system"},
 		Spec: assignmentv1alpha1.SandboxAccessRequestSpec{
 			AssignmentRef:            assignmentv1alpha1.AssignmentReference{Name: "assignment-a", UID: types.UID("assignment-uid")},
+			PodUID:                   types.UID("pod-uid"),
 			BasePolicyRevision:       "sha256:0123456789",
 			Backend:                  "cachew",
 			Method:                   "GET",

@@ -18,8 +18,10 @@ import (
 	"syscall"
 	"time"
 
+	assignmentadmission "github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/admission"
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/authz"
 	assignmentcontroller "github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/controller"
+	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/credentialbroker"
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/opensandboxapi"
 	assignmentkubernetes "github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/store/kubernetes"
 
@@ -150,14 +152,34 @@ func run(logger *slog.Logger, opts options) error {
 	grpcHealth.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
 	healthv1.RegisterHealthServer(grpcServer, grpcHealth)
 
+	lifecycleHandler := opensandboxapi.NewHandler(assignmentStore, opensandboxapi.Config{
+		Prefix:    "/opensandbox",
+		Upstream:  openSandboxURL,
+		APIKey:    os.Getenv("ASSIGNMENTD_OPENSANDBOX_API_KEY"),
+		Namespace: assignmentNamespace,
+		Admission: assignmentadmission.NewKubernetesAdmission(dynamicClient, assignmentNamespace, workloadNamespace),
+	}, logger)
+	apiMux := http.NewServeMux()
+	apiMux.Handle("/opensandbox", lifecycleHandler)
+	apiMux.Handle("/opensandbox/", lifecycleHandler)
+	if signingKey := os.Getenv("ASSIGNMENTD_BROKER_SIGNING_KEY"); signingKey != "" {
+		broker, err := credentialbroker.New(
+			checker,
+			credentialbroker.NewKubernetesGrantValidator(dynamicClient, coreClient, assignmentNamespace, workloadNamespace),
+			credentialbroker.NewKubernetesAuditSink(dynamicClient, assignmentNamespace),
+			credentialbroker.Config{SigningKey: []byte(signingKey)},
+			logger,
+		)
+		if err != nil {
+			return err
+		}
+		apiMux.Handle("/broker/", broker)
+	} else {
+		logger.Warn("credential broker disabled because ASSIGNMENTD_BROKER_SIGNING_KEY is unset")
+	}
 	apiServer := &http.Server{
-		Addr: apiAddress,
-		Handler: opensandboxapi.NewHandler(assignmentStore, opensandboxapi.Config{
-			Prefix:    "/opensandbox",
-			Upstream:  openSandboxURL,
-			APIKey:    os.Getenv("ASSIGNMENTD_OPENSANDBOX_API_KEY"),
-			Namespace: assignmentNamespace,
-		}, logger),
+		Addr:              apiAddress,
+		Handler:           apiMux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      11 * time.Minute,

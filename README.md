@@ -6,6 +6,11 @@ This POC runs [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) on
 - logical tenants, teams, and permission levels;
 - immutable capability boundaries;
 - temporary access requests tied to one exact sandbox incarnation;
+- fail-closed tenant admission budgets;
+- readiness diagnostics and exact policy-impact simulation;
+- sandbox-only validation with durable hashed evidence;
+- short-lived broker authority bound to the current Pod identity;
+- snapshot pause/resume with state continuity and authority rotation;
 - requester and administrator pages; and
 - approval, expiry, audit retention, and stale-request fencing.
 
@@ -85,6 +90,7 @@ kubectl create namespace aks-sandbox-system --dry-run=client -o yaml | kubectl a
 kubectl apply -f deploy/governance/k8s/crds.yaml
 kubectl apply -f deploy/governance/k8s/capability-bundles.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-templates.yaml
+kubectl apply -f deploy/governance/k8s/tenant-policies.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-serviceaccount.yaml
 ```
 
@@ -174,12 +180,25 @@ Harnesses can only select enabled templates.
 Admin-entered egress rules reject explicit ports, query strings, and fragments
 instead of silently widening a grant. Admin-entered commands are exact strings;
 the dashboard generates the anchored policy representation automatically.
+Validation rules use `path-prefix => exact command`; each selected command must
+also be allowed by the exact command policy.
 
 The page is a convenience frontend, not a second configuration store. Every
 boundary and template created there is stored as a Kubernetes
 `CapabilityBundle` or `SandboxTemplate` custom resource. Platform teams can
 define the same resources directly with YAML and manage them through GitOps,
 Helm, Kustomize, or another Kubernetes-native workflow.
+
+Tenant limits are Kubernetes-native too:
+
+```bash
+kubectl -n aks-sandbox-system get sandboxtenantpolicies
+```
+
+`SandboxTenantPolicy` fails closed when no enabled revision exists for the
+logical tenant. It limits approved bundle names or prefixes, concurrent
+sandboxes, maximum lifetime, CPU, memory, and temporary access duration before
+an assignment is created.
 
 Create a sandbox from the requester page and wait for its assignment to become ready:
 
@@ -256,6 +275,15 @@ become ready and mediated egress is denied.
 - Approvals are exact overlays, not mutations of a live capability bundle.
 - Authorization uses an audience-restricted token bound to the current Pod UID.
 - Authorization fails closed on stale caches, ambiguous state, malformed targets, expired grants, or incarnation mismatch.
+- Temporary access and brokered credentials are invalid after pause/resume
+  replaces the Pod UID.
+- Broker credential values are never persisted in Kubernetes audit resources.
+- Validation resources retain output hashes instead of unrestricted logs.
+- Tenant admission fails closed when the requested logical tenant has no
+  enabled policy revision.
+- `assignmentd` is intentionally a singleton with `Recreate` rollout strategy,
+  so the budget check and assignment reservation are serialized without a
+  rolling-update overlap.
 - Audit events omit headers, query strings, bodies, credentials, tokens, and source IPs.
 - The asynchronous audit queue cannot turn a valid allow into a deny.
 - Logical tenants in this POC are governance labels, not Azure tenant or Kubernetes namespace isolation.
@@ -303,6 +331,37 @@ command only when the bundle's command policy allows it, captures attribution
 evidence, and confirms the assignment, workload, and Pod are gone before
 reporting cleanup complete.
 
+The same MCP server also exposes:
+
+- `validate_change`, which maps normalized repository-relative paths to exact
+  approved commands and writes a `SandboxValidationRun` containing source,
+  sandbox, Pod, command, output-hash, and cleanup evidence;
+- `exercise_brokered_credential`, which issues a 1-15 minute exact grant,
+  verifies it against live assignment and Pod state, revokes it, and proves
+  replay denial without returning the credential; and
+- `snapshot_pause_resume`, which writes state, pauses through the governed
+  lifecycle facade, resumes onto a fresh Pod UID, confirms filesystem
+  continuity, and rejects the pre-snapshot credential.
+
+The current broker uses an internal HMAC-signed POC JWT. It proves bounded
+scope, lifetime, revocation, and lifecycle invalidation, but does not yet
+exchange the grant for a real GitHub, Azure DevOps, package-feed, Kusto, or AKS
+credential.
+
+## Readiness contract
+
+Run the doctor before CI or a live demonstration:
+
+```bash
+go run ./cmd/sandbox-doctor
+go run ./cmd/sandbox-doctor --output json | jq .
+```
+
+Missing Kata capacity, governance APIs, assignment/OpenSandbox services,
+ServiceAccount security, or enabled template/bundle/tenant inventory fails
+readiness. Missing `ResourceQuota` or `NetworkPolicy` is reported as a warning
+so the POC remains runnable while the production gap stays visible.
+
 ## Replay the full live demonstration
 
 After deploying OpenSandbox and `assignmentd`, install the optional screenshot
@@ -337,6 +396,25 @@ For an unattended replay:
 
 Set `RUN_OPENCODE=false` to demonstrate only the governance UI and egress flow,
 or `CAPTURE_SCREENSHOTS=false` to skip screenshots.
+
+Run the extended governance demonstration with:
+
+```bash
+./scripts/extended-governance-demo.sh
+```
+
+It applies tenant policies, creates the broker signing Secret without printing
+the key, restarts `assignmentd`, runs the doctor, captures tenant budgets,
+executes automatic sandbox validation, proves credential revocation and replay
+denial, and exercises snapshot pause/resume with Pod identity rotation.
+Evidence is written under `demo-output/<timestamp>-extended/`. Set
+`RUN_SNAPSHOT=false` only when the cluster was intentionally installed without
+snapshot prerequisites.
+
+The live POC's logical tenants share the `opensandbox` namespace. Separate
+namespaces, ServiceAccounts, and node pools remain necessary for stronger
+Kubernetes multi-tenancy. Admission-injected projected sidecars, provider-backed
+credential exchange, and governed browser sessions are future experiments.
 
 ## Cleanup
 

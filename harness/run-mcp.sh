@@ -47,6 +47,7 @@ start_random_forward() {
 
 start_random_forward 8080 -n aks-sandbox-system svc/assignmentd
 export ASSIGNMENTD_URL="http://127.0.0.1:${forward_port}/opensandbox"
+export CREDENTIAL_BROKER_URL="http://127.0.0.1:${forward_port}/broker"
 
 start_random_forward 8080 -n opensandbox svc/opensandbox-server
 export OPEN_SANDBOX_DOMAIN="127.0.0.1:${forward_port}"

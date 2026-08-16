@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment"
@@ -37,6 +38,12 @@ type Config struct {
 	APIKey            string
 	Namespace         string
 	TransitionTimeout time.Duration
+	Admission         Admission
+}
+
+// Admission enforces tenant budgets before an assignment or upstream sandbox is created.
+type Admission interface {
+	AuthorizeCreate(context.Context, string, *ossandbox.CreateSandboxRequest) error
 }
 
 // createSandboxResponse fills the SDK's missing asynchronous create response
@@ -81,6 +88,7 @@ type Handler struct {
 	proxy      *httputil.ReverseProxy
 	httpClient *http.Client
 	logger     *slog.Logger
+	createMu   sync.Mutex
 }
 
 // NewHandler creates an OpenSandbox-compatible facade.
@@ -180,6 +188,15 @@ func (h *Handler) create(w http.ResponseWriter, request *http.Request) {
 	bundleName := profile
 	delete(value.Extensions, CapabilityProfileExtension)
 	delete(value.Extensions, assignmentUIDExtension)
+	h.createMu.Lock()
+	if h.config.Admission != nil {
+		if err := h.config.Admission.AuthorizeCreate(request.Context(), bundleName, &value); err != nil {
+			h.createMu.Unlock()
+			h.logger.WarnContext(request.Context(), "sandbox creation rejected by tenant policy", "bundle", bundleName, "error", err)
+			writeError(w, http.StatusForbidden, "sandbox creation does not satisfy the tenant policy")
+			return
+		}
+	}
 
 	// TODO: persist a create-operation/idempotency record. A process crash after
 	// this create and before the upstream response can leave a pending assignment;
@@ -190,6 +207,7 @@ func (h *Handler) create(w http.ResponseWriter, request *http.Request) {
 		GenerateName:         "assignment-",
 		CapabilityBundleName: bundleName,
 	})
+	h.createMu.Unlock()
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
@@ -266,7 +284,6 @@ func (h *Handler) pause(w http.ResponseWriter, request *http.Request, sandboxID 
 	}
 	response, body, err := h.doUpstream(request.Context(), http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/pause", request.Header, nil)
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
-		_ = h.store.SetLifecycleFence(request.Context(), h.config.Namespace, value.Name, false, "")
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "OpenSandbox is unavailable")
 		} else {

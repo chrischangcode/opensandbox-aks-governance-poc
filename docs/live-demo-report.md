@@ -20,6 +20,10 @@ included below.
 | Command boundary | Approved command runs; unapproved `id` is rejected before creation |
 | Per-sandbox network attribution | Deny and allow events carry sandbox, tenant, team, target, and decision source |
 | Exact elevation | Approval is fenced by assignment UID, policy revision, backend, method, host, path, and expiry |
+| Tenant budgets | Admission limits bundle revisions, concurrency, lifetime, CPU, memory, and access duration |
+| Governed validation | Changed paths select exact sandbox-only commands; durable evidence stores output hashes |
+| Lifecycle authority | Broker grants and temporary access are bound to the current Pod UID |
+| Snapshot continuity | State survives pause/resume while pre-snapshot authority becomes invalid |
 | Cleanup | Ephemeral assignment, workload, and Pod absence is confirmed before success |
 
 ## Product walkthrough
@@ -130,6 +134,59 @@ The replay creates its demonstration capability boundary and template through
 the admin HTTP workflow, verifies that the corresponding Kubernetes custom
 resources exist, and removes them during cleanup.
 
+The companion replay exercises the newer governance experiments:
+
+```bash
+./scripts/extended-governance-demo.sh
+```
+
+It runs the readiness doctor, displays logical-tenant budgets, executes
+automatic sandbox validation, proves short-lived credential revocation and
+replay denial, and pauses/snapshots/resumes a sandbox while verifying state
+continuity, Pod UID rotation, and rejection of pre-snapshot authority.
+
+The script creates Kubernetes Secret `assignmentd-credential-broker` from an
+`openssl`-generated value piped directly to `kubectl`, then unsets the shell
+value. The key is not printed or committed. Terminal evidence is written under
+`demo-output/<timestamp>-extended/`.
+
+The live extended replay completed on 2026-08-16. Representative sanitized
+evidence:
+
+```text
+doctor.ready: true
+governance inventory: 3 enabled templates, 10 bundles, 2 enabled tenant policies
+tenant-a budget: 4 concurrent, 3600s lifetime, 2 CPU, 2Gi memory
+tenant-b budget: 2 concurrent, 1800s lifetime, 1 CPU, 1Gi memory
+```
+
+The readiness contract passed all hard requirements and reported one explicit
+production warning: the shared workload namespace did not yet have a
+`NetworkPolicy`.
+
+```text
+validation run: validation-vk4x6
+state: Succeeded
+template: python-kata-reader-v2
+runtime class: kata-optimized
+stdout hash: sha256:b236a58c2789594cb8d8ce2823d4009b00ba9a5e98555bcb979c077576def623
+stderr hash: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+cleanup: true
+```
+
+The credential exercise recorded `issued`, `used`, and `revoked` audit actions
+for exact `GET https://example.com/docs` scope. The tool then proved replay
+denial without returning or persisting the credential.
+
+```text
+snapshot state preserved: true
+old Pod UID: 5c6cef70-da56-4b57-bbe1-69e644a2a52a
+new Pod UID: 85c64fff-7a18-45df-a721-90955dbb6a3e
+Pod identity rotated: true
+pre-snapshot credential rejected: true
+cleanup: true
+```
+
 ## Kubernetes-native source of truth
 
 The admin page is intentionally a convenience layer over Kubernetes APIs.
@@ -194,6 +251,7 @@ kubectl create namespace aks-sandbox-system --dry-run=client -o yaml |
 kubectl apply -f deploy/governance/k8s/crds.yaml
 kubectl apply -f deploy/governance/k8s/capability-bundles.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-templates.yaml
+kubectl apply -f deploy/governance/k8s/tenant-policies.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-serviceaccount.yaml
 
 envsubst '${ASSIGNMENTD_IMAGE}' \
@@ -644,8 +702,23 @@ git diff check: passed
 - Every allowed harness command creates a fresh governed sandbox; the tool does
   not report cleanup complete until its assignment, workload, and Pod are gone.
 - Temporary access cannot be reused when the assignment UID, policy revision,
-  backend, HTTP method, normalized host, normalized path, or expiration differs.
+  Pod UID, backend, HTTP method, normalized host, normalized path, or expiration
+  differs.
+- `SandboxTenantPolicy` admission fails closed and enforces logical-tenant
+  bundle, concurrency, lifetime, CPU, memory, and access-duration budgets.
+- The assignment API is deployed as one replica with `Recreate` strategy so
+  budget admission and assignment reservation remain serialized.
+- Changed paths select only exact admin-approved validation commands. Durable
+  `SandboxValidationRun` evidence stores stdout/stderr hashes rather than
+  unrestricted logs.
+- Broker grants are exact, short-lived, revocable, credential-free in audit,
+  and verified against live assignment and Pod state.
+- Snapshot resume must produce a new Pod UID. Filesystem state is expected to
+  persist while temporary grants and broker credentials tied to the old Pod
+  are rejected.
 - Audit events omit headers, queries, bodies, source IPs, credentials, and
   tokens.
 - Logical tenants are demonstrated as governance boundaries; this POC does not
-  claim physical Azure tenant isolation.
+  claim physical Azure tenant, Kubernetes namespace, or node-pool isolation.
+- The current broker is an internal HMAC-signed proof-of-authority grant, not a
+  provider-backed GitHub, Azure DevOps, package-feed, Kusto, or AKS token.

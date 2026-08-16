@@ -533,6 +533,7 @@ func matchAccessGrantObjects(objects []any, decision Decision, now time.Time) (s
 			continue
 		}
 		if request.Spec.AssignmentRef.Name != decision.AssignmentName ||
+			string(request.Spec.PodUID) != decision.PodUID ||
 			request.Spec.BasePolicyRevision != decision.CapabilityBundleRevision {
 			continue
 		}

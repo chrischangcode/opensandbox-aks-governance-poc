@@ -123,6 +123,9 @@ func ValidateAccessRequestSpec(spec assignmentv1alpha1.SandboxAccessRequestSpec)
 	if spec.AssignmentRef.UID == "" {
 		return errors.New("assignment UID is required")
 	}
+	if spec.PodUID == "" {
+		return errors.New("Pod UID is required")
+	}
 	if len(spec.BasePolicyRevision) < 8 || len(spec.BasePolicyRevision) > 128 || containsControl(spec.BasePolicyRevision) {
 		return errors.New("base policy revision is invalid")
 	}

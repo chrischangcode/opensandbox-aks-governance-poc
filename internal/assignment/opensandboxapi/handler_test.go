@@ -12,9 +12,11 @@ import (
 	"net/url"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment"
 
+	ossandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -29,6 +31,32 @@ type fakeStore struct {
 	createErr       error
 	setSandboxIDErr error
 	lifecycleErr    error
+}
+
+type trackingAdmission struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+}
+
+func (a *trackingAdmission) AuthorizeCreate(context.Context, string, *ossandbox.CreateSandboxRequest) error {
+	a.mu.Lock()
+	a.active++
+	if a.active > a.maxActive {
+		a.maxActive = a.active
+	}
+	a.mu.Unlock()
+	time.Sleep(25 * time.Millisecond)
+	a.mu.Lock()
+	a.active--
+	a.mu.Unlock()
+	return nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func (s *fakeStore) Create(_ context.Context, request assignment.CreateRequest) (*assignment.Assignment, error) {
@@ -210,6 +238,28 @@ func TestCreateMappingFailureDeletesUpstreamAndAssignment(t *testing.T) {
 	}
 }
 
+func TestCreateSerializesAdmissionAndAssignmentReservation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"id":"sandbox-123","status":{"state":"Pending"},"createdAt":"2026-08-11T00:00:00Z"}`))
+	}))
+	defer upstream.Close()
+	admission := &trackingAdmission{}
+	handler := newTestHandlerWithAdmission(t, &fakeStore{}, upstream.URL, admission)
+	var wait sync.WaitGroup
+	wait.Add(2)
+	for range 2 {
+		go func() {
+			defer wait.Done()
+			handler.ServeHTTP(httptest.NewRecorder(), validCreateRequest())
+		}()
+	}
+	wait.Wait()
+	if admission.maxActive != 1 {
+		t.Fatalf("maximum concurrent admissions = %d", admission.maxActive)
+	}
+}
+
 func TestPauseRevokesBeforeUpstream(t *testing.T) {
 	store := &fakeStore{value: &assignment.Assignment{Name: "assignment-a981", Ready: true, WorkloadRef: &assignment.ObjectReference{Name: "sandbox-123"}}}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -226,6 +276,22 @@ func TestPauseRevokesBeforeUpstream(t *testing.T) {
 	newTestHandler(t, store, upstream.URL).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/opensandbox/sandboxes/sandbox-123/pause", nil))
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status=%d", response.Code)
+	}
+}
+
+func TestPauseTransportFailureKeepsAssignmentFenced(t *testing.T) {
+	store := &fakeStore{value: &assignment.Assignment{
+		Name: "assignment-a981", Ready: true,
+		WorkloadRef: &assignment.ObjectReference{Name: "sandbox-123"},
+	}}
+	handler := newTestHandler(t, store, "http://upstream.invalid").(*Handler)
+	handler.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("response lost")
+	})}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/opensandbox/sandboxes/sandbox-123/pause", nil))
+	if response.Code != http.StatusBadGateway || !store.paused {
+		t.Fatalf("status=%d paused=%v", response.Code, store.paused)
 	}
 }
 
@@ -303,6 +369,10 @@ func TestPatchRejectsReservedMetadata(t *testing.T) {
 }
 
 func newTestHandler(t *testing.T, store assignment.Store, upstream string) http.Handler {
+	return newTestHandlerWithAdmission(t, store, upstream, nil)
+}
+
+func newTestHandlerWithAdmission(t *testing.T, store assignment.Store, upstream string, admission Admission) http.Handler {
 	t.Helper()
 	parsed, err := url.Parse(upstream)
 	if err != nil {
@@ -312,6 +382,7 @@ func newTestHandler(t *testing.T, store assignment.Store, upstream string) http.
 		Upstream:  parsed,
 		APIKey:    "upstream-key",
 		Namespace: "aks-sandbox-system",
+		Admission: admission,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 

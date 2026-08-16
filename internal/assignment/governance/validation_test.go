@@ -48,6 +48,7 @@ func TestValidateAccessRequestSpec(t *testing.T) {
 func validAccessRequestSpec() assignmentv1alpha1.SandboxAccessRequestSpec {
 	return assignmentv1alpha1.SandboxAccessRequestSpec{
 		AssignmentRef:            assignmentv1alpha1.AssignmentReference{Name: "assignment-a", UID: types.UID("assignment-uid")},
+		PodUID:                   types.UID("pod-uid"),
 		BasePolicyRevision:       "sha256:0123456789",
 		Backend:                  "cachew",
 		Method:                   "GET",

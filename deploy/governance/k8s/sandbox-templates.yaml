@@ -20,6 +20,25 @@ spec:
 apiVersion: aks-sandbox.azure.com/v1alpha1
 kind: SandboxTemplate
 metadata:
+  name: python-kata-reader-v2
+  namespace: aks-sandbox-system
+spec:
+  displayName: Python Kata reader with governed validation
+  description: Ephemeral Python sandbox with exact validation selection and hashed evidence.
+  image: python@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4
+  entrypoint: [tail, -f, /dev/null]
+  capabilityBundleRef:
+    name: team-a-harness-reader-v2
+    policyRevision: sha256:746f3aef5f1c364b8af821d3cf7234693e666e9e7278a5eaac36f5e6134bdab4
+  resources:
+    cpu: 500m
+    memory: 512Mi
+  timeoutSeconds: 1800
+  enabled: true
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: SandboxTemplate
+metadata:
   name: python-kata-web-reader-v1
   namespace: aks-sandbox-system
 spec:

@@ -1,0 +1,40 @@
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: SandboxTenantPolicy
+metadata:
+  name: tenant-a-v1
+  namespace: aks-sandbox-system
+spec:
+  logicalTenant: tenant-a
+  workloadNamespace: opensandbox
+  allowedCapabilityBundles:
+    - team-a-reader
+    - team-a-contributor
+    - team-a-harness-reader-v1
+    - team-a-harness-reader-v2
+    - team-a-web-reader-v1
+  allowedCapabilityBundlePrefixes:
+    - demo-
+  maxConcurrentSandboxes: 4
+  maxLifetimeSeconds: 3600
+  maxAccessRequestDurationSeconds: 3600
+  maxCpu: "2"
+  maxMemory: 2Gi
+  enabled: true
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: SandboxTenantPolicy
+metadata:
+  name: tenant-b-v1
+  namespace: aks-sandbox-system
+spec:
+  logicalTenant: tenant-b
+  workloadNamespace: opensandbox
+  allowedCapabilityBundles:
+    - team-b-reader
+  allowedCapabilityBundlePrefixes: []
+  maxConcurrentSandboxes: 2
+  maxLifetimeSeconds: 1800
+  maxAccessRequestDurationSeconds: 1800
+  maxCpu: "1"
+  maxMemory: 1Gi
+  enabled: true

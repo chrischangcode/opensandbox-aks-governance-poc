@@ -58,6 +58,26 @@ spec:
 apiVersion: aks-sandbox.azure.com/v1alpha1
 kind: CapabilityBundle
 metadata:
+  name: team-a-harness-reader-v2
+  namespace: aks-sandbox-system
+spec:
+  governance:
+    logicalTenant: tenant-a
+    team: readers
+    permissionLevel: reader
+    displayName: Team A sandbox-only harness with validation
+  harness:
+    commandPolicy:
+      - pattern: '^uname -a && python --version$'
+        decision: allow
+        reason: Read-only runtime identity demonstration.
+    validationRules:
+      - pathPrefix: '*'
+        command: uname -a && python --version
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: CapabilityBundle
+metadata:
   name: team-a-web-reader-v1
   namespace: aks-sandbox-system
 spec:

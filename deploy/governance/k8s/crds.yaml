@@ -146,6 +146,22 @@ spec:
                           reason:
                             type: string
                             maxLength: 512
+                    validationRules:
+                      type: array
+                      maxItems: 128
+                      items:
+                        type: object
+                        required: [pathPrefix, command]
+                        properties:
+                          pathPrefix:
+                            type: string
+                            minLength: 1
+                            maxLength: 512
+                            pattern: '^[^/].*$'
+                          command:
+                            type: string
+                            minLength: 1
+                            maxLength: 2048
                 governance:
                   type: object
                   properties:
@@ -178,6 +194,108 @@ spec:
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxtenantpolicies.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: sandboxtenantpolicies
+    singular: sandboxtenantpolicy
+    kind: SandboxTenantPolicy
+    shortNames: [sbtenant]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required:
+                - logicalTenant
+                - workloadNamespace
+                - allowedCapabilityBundles
+                - allowedCapabilityBundlePrefixes
+                - maxConcurrentSandboxes
+                - maxLifetimeSeconds
+                - maxAccessRequestDurationSeconds
+                - maxCpu
+                - maxMemory
+                - enabled
+              properties:
+                logicalTenant:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                workloadNamespace:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                allowedCapabilityBundles:
+                  type: array
+                  maxItems: 128
+                  x-kubernetes-list-type: set
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 253
+                allowedCapabilityBundlePrefixes:
+                  type: array
+                  maxItems: 128
+                  x-kubernetes-list-type: set
+                  items:
+                    type: string
+                    minLength: 2
+                    maxLength: 63
+                    pattern: '^[a-z0-9]([-a-z0-9]*-)$'
+                maxConcurrentSandboxes:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  maximum: 1000
+                maxLifetimeSeconds:
+                  type: integer
+                  format: int32
+                  minimum: 60
+                  maximum: 86400
+                maxAccessRequestDurationSeconds:
+                  type: integer
+                  format: int32
+                  minimum: 60
+                  maximum: 28800
+                maxCpu: { type: string, minLength: 1, maxLength: 32 }
+                maxMemory: { type: string, minLength: 1, maxLength: 32 }
+                enabled: { type: boolean }
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: SandboxTenantPolicy.spec is immutable; create a new policy revision instead
+                - rule: 'size(self.allowedCapabilityBundles) + size(self.allowedCapabilityBundlePrefixes) > 0'
+                  message: at least one exact bundle or bundle prefix is required
+      additionalPrinterColumns:
+        - name: Tenant
+          type: string
+          jsonPath: .spec.logicalTenant
+        - name: Namespace
+          type: string
+          jsonPath: .spec.workloadNamespace
+        - name: Concurrent
+          type: integer
+          jsonPath: .spec.maxConcurrentSandboxes
+        - name: Lifetime
+          type: integer
+          jsonPath: .spec.maxLifetimeSeconds
+        - name: Enabled
+          type: boolean
+          jsonPath: .spec.enabled
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -291,6 +409,7 @@ spec:
               type: object
               required:
                 - assignmentRef
+                - podUid
                 - basePolicyRevision
                 - backend
                 - method
@@ -312,6 +431,10 @@ spec:
                       type: string
                       minLength: 1
                       maxLength: 128
+                podUid:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
                 basePolicyRevision:
                   type: string
                   minLength: 8
@@ -528,3 +651,216 @@ spec:
         - name: Source
           type: string
           jsonPath: .spec.decisionSource
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxvalidationruns.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: sandboxvalidationruns
+    singular: sandboxvalidationrun
+    kind: SandboxValidationRun
+    shortNames: [sbvalidation]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required:
+                - taskId
+                - repository
+                - sourceRevision
+                - changedPaths
+                - selectedCommands
+                - templateName
+                - assignmentRef
+                - podUid
+                - sandboxId
+                - capabilityBundleName
+                - capabilityBundleRevision
+                - startedAt
+              properties:
+                taskId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+                repository:
+                  type: string
+                  minLength: 1
+                  maxLength: 512
+                sourceRevision:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                changedPaths:
+                  type: array
+                  minItems: 1
+                  maxItems: 256
+                  items: { type: string, minLength: 1, maxLength: 512 }
+                selectedCommands:
+                  type: array
+                  minItems: 1
+                  maxItems: 128
+                  items: { type: string, minLength: 1, maxLength: 2048 }
+                templateName: { type: string, minLength: 1, maxLength: 253 }
+                assignmentRef:
+                  type: object
+                  required: [name, uid]
+                  properties:
+                    name: { type: string, minLength: 1, maxLength: 253 }
+                    uid: { type: string, minLength: 1, maxLength: 128 }
+                podUid: { type: string, minLength: 1, maxLength: 128 }
+                sandboxId: { type: string, minLength: 1, maxLength: 253 }
+                capabilityBundleName: { type: string, minLength: 1, maxLength: 253 }
+                capabilityBundleRevision:
+                  type: string
+                  pattern: '^sha256:[a-f0-9]{64}$'
+                startedAt: { type: string, format: date-time }
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: SandboxValidationRun.spec is immutable
+            status:
+              type: object
+              properties:
+                state:
+                  type: string
+                  enum: [Running, Succeeded, Failed]
+                completedAt: { type: string, format: date-time }
+                results:
+                  type: array
+                  maxItems: 128
+                  items:
+                    type: object
+                    required: [command, exitCode, stdoutSha256, stderrSha256]
+                    properties:
+                      command: { type: string, minLength: 1, maxLength: 2048 }
+                      exitCode: { type: integer, format: int32 }
+                      stdoutSha256: { type: string, pattern: '^sha256:[a-f0-9]{64}$' }
+                      stderrSha256: { type: string, pattern: '^sha256:[a-f0-9]{64}$' }
+                cleanedUp: { type: boolean }
+                message: { type: string, maxLength: 512 }
+              x-kubernetes-validations:
+                - rule: 'self.state == "Running" || has(self.completedAt)'
+                  message: terminal validation states require completedAt
+      additionalPrinterColumns:
+        - name: State
+          type: string
+          jsonPath: .status.state
+        - name: Task
+          type: string
+          jsonPath: .spec.taskId
+        - name: Revision
+          type: string
+          jsonPath: .spec.sourceRevision
+        - name: Sandbox
+          type: string
+          jsonPath: .spec.sandboxId
+        - name: Cleaned
+          type: boolean
+          jsonPath: .status.cleanedUp
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxcredentialevents.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: sandboxcredentialevents
+    singular: sandboxcredentialevent
+    kind: SandboxCredentialEvent
+    shortNames: [sbcredential]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required:
+                - timestamp
+                - grantId
+                - action
+                - taskId
+                - assignmentRef
+                - podUid
+                - sandboxId
+                - capabilityBundleName
+                - capabilityBundleRevision
+                - backend
+                - method
+                - host
+                - path
+                - expiresAt
+              properties:
+                timestamp: { type: string, format: date-time }
+                grantId: { type: string, format: uuid }
+                action:
+                  type: string
+                  enum: [issued, used, revoked]
+                taskId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+                assignmentRef:
+                  type: object
+                  required: [name, uid]
+                  properties:
+                    name: { type: string, minLength: 1, maxLength: 253 }
+                    uid: { type: string, minLength: 1, maxLength: 128 }
+                podUid: { type: string, minLength: 1, maxLength: 128 }
+                sandboxId: { type: string, minLength: 1, maxLength: 253 }
+                capabilityBundleName: { type: string, minLength: 1, maxLength: 253 }
+                capabilityBundleRevision: { type: string, minLength: 8, maxLength: 128 }
+                backend:
+                  type: string
+                  pattern: '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+                method:
+                  type: string
+                  pattern: '^[A-Z][A-Z0-9_-]{0,31}$'
+                host: { type: string, minLength: 1, maxLength: 253 }
+                path: { type: string, minLength: 1, maxLength: 2048, pattern: '^/' }
+                expiresAt: { type: string, format: date-time }
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: SandboxCredentialEvent.spec is immutable
+      additionalPrinterColumns:
+        - name: Action
+          type: string
+          jsonPath: .spec.action
+        - name: Task
+          type: string
+          jsonPath: .spec.taskId
+        - name: Sandbox
+          type: string
+          jsonPath: .spec.sandboxId
+        - name: Target
+          type: string
+          jsonPath: .spec.host
+        - name: Expires
+          type: date
+          jsonPath: .spec.expiresAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
