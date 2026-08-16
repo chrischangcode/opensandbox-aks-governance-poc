@@ -123,6 +123,9 @@ The admin view shows the initial deny and the subsequent
 
 ## Architecture
 
+The README contains the detailed
+[current-state and remaining-P0 architecture diagrams](../README.md#architecture-and-remaining-p0s).
+
 ```mermaid
 flowchart LR
     User[LLM user] --> OpenCode[OpenCode sandbox-only agent]

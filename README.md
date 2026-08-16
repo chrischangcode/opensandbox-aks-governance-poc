@@ -31,6 +31,124 @@ the unresolved or partially proven work required for an Azure service.
 |---|---|
 | ![Running governed sandbox](docs/assets/requester-dashboard.png) | ![Administrator capability editor](docs/assets/admin-capabilities.png) |
 
+## Architecture and remaining P0s
+
+### Current implemented POC
+
+This is the architecture exercised by `./scripts/live-demo.sh`. Solid arrows
+represent implemented request or state paths. The mediated egress path proves
+authorization and attribution, but the external mediator/probe does not yet
+forward arbitrary sandbox traffic.
+
+```mermaid
+flowchart TB
+    subgraph Clients["Users and automation"]
+        User["LLM user"]
+        Admin["Sandbox administrator"]
+        OpenCode["OpenCode<br/>sandbox-only agent"]
+        MCP["Governance MCP harness"]
+        Dashboard["Requester and admin dashboard"]
+    end
+
+    subgraph Control["AKS governance control plane"]
+        Assignmentd["assignmentd<br/>2 API replicas<br/>1 elected controller"]
+        Auth["TokenReview and<br/>SandboxPrincipalBinding"]
+        CRDs["Kubernetes CRDs<br/>templates, bundles, tenants,<br/>assignments, access, audit,<br/>revocations and evidence"]
+        OpenSandbox["OpenSandbox server<br/>SQLite on PVC"]
+        Mediator["External mediator / egress probe<br/>trusted Pod-bound identity<br/>decision path only"]
+    end
+
+    subgraph Runtime["Governed sandbox runtime"]
+        Kata["Kata-isolated sandbox Pod<br/>no automatic ServiceAccount token"]
+        Cilium["Cilium default-deny<br/>TCP, UDP and DNS"]
+        Workspace["Workspace and snapshot state"]
+    end
+
+    Internet["External targets"]
+    Audit["Per-sandbox attributed<br/>decisions and credential events"]
+
+    User --> OpenCode --> MCP --> Assignmentd
+    User --> Dashboard
+    Admin --> Dashboard
+    Dashboard --> Assignmentd
+    Dashboard <--> CRDs
+    Assignmentd --> Auth
+    Assignmentd <--> CRDs
+    Assignmentd --> OpenSandbox --> Kata
+    Kata <--> Workspace
+    Kata --- Cilium
+    Cilium -->|"blocks direct egress"| Internet
+    Kata -.->|"sandbox and Pod context"| Mediator
+    Mediator --> Assignmentd
+    Assignmentd -.->|"exact allow or deny decision"| Internet
+    Assignmentd --> Audit --> CRDs
+```
+
+The live POC uses one Azure tenant and one AKS cluster. Logical tenants,
+immutable templates, exact elevation, distributed quota admission, credential
+revocation, snapshot identity rotation, forced-egress denial, and per-sandbox
+attribution are implemented inside that boundary.
+
+### Remaining P0 Azure-service architecture
+
+The following components are **not** claimed as completed. They depict the P0
+work required to turn the POC into a secure, regional, multitenant Azure
+service.
+
+```mermaid
+flowchart TB
+    subgraph Entry["Azure resource and identity boundary"]
+        ARM["Azure Resource Manager<br/>resource provider contract"]
+        Entra["Microsoft Entra ID<br/>Azure RBAC and managed identities"]
+        Private["Private endpoints, mTLS<br/>and certificate rotation"]
+    end
+
+    subgraph Regional["P0: Regional control plane"]
+        API["Zone-redundant lifecycle,<br/>policy and admission APIs"]
+        Store["Transactional regional store<br/>conditional writes, backup,<br/>restore and failover"]
+        Reconciler["Durable operation state machines<br/>fenced leases, replay and<br/>ambiguous-result reconciliation"]
+        KeyService["Managed key boundary<br/>provider token exchange<br/>and signing-key rotation"]
+    end
+
+    subgraph RuntimeP0["P0: Multitenant runtime and data plane"]
+        Isolation["Defined isolation tiers<br/>namespace, node pool or cluster"]
+        Fleet["Multi-zone AKS runtime fleet<br/>upgrade and capacity safety"]
+        Egress["Mandatory transparent egress<br/>outside sandbox control"]
+        DNS["Controlled DNS and<br/>private-network resolution"]
+        Snapshots["Encrypted managed snapshots<br/>retention, deletion and restore"]
+    end
+
+    subgraph Operations["P0: Managed-service operations"]
+        Telemetry["Regional immutable audit<br/>and telemetry pipeline"]
+        Reliability["SLOs, autoscaling, DR,<br/>health and incident response"]
+        Trust["Abuse, malware, compliance,<br/>support and data residency"]
+        Billing["Reconciled compute, storage,<br/>network and capability metering"]
+    end
+
+    ARM --> API
+    Entra --> API
+    Private --> API
+    API <--> Store
+    API --> Reconciler --> Fleet
+    API --> KeyService
+    Fleet --> Isolation
+    Isolation --> Egress --> DNS
+    Isolation --> Snapshots
+    API --> Telemetry
+    Egress --> Telemetry
+    Snapshots --> Telemetry
+    Store --> Reliability
+    Fleet --> Reliability
+    Telemetry --> Trust
+    Telemetry --> Billing
+
+    classDef p0 fill:#fff4ce,stroke:#a15c00,color:#3b2f00;
+    class ARM,Entra,Private,API,Store,Reconciler,KeyService,Isolation,Fleet,Egress,DNS,Snapshots,Telemetry,Reliability,Trust,Billing p0;
+```
+
+The detailed gap definitions and lifecycle edge cases are maintained in
+[Remaining P0 Service Work](docs/p0-service-boundary-findings.md).
+
 ## Prerequisites
 
 - An Azure subscription where you can create AKS, ACR, role assignments, and resource groups

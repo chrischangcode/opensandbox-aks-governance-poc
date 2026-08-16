@@ -3,6 +3,10 @@
 This document contains only the service-boundary work that remains unresolved or
 partially proven after the OpenSandbox-on-AKS governance POC.
 
+See the README's
+[remaining-P0 architecture diagram](../README.md#remaining-p0-azure-service-architecture)
+for the target service shape represented by these gaps.
+
 The controls already demonstrated live are documented in
 [live-demo-report.md](live-demo-report.md#implemented-service-boundaries). They include
 trusted lifecycle templates, authenticated logical-tenant authorization, durable
