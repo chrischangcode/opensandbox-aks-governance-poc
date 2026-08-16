@@ -46,48 +46,80 @@ flowchart TB
         User["LLM user"]
         Admin["Sandbox administrator"]
         OpenCode["OpenCode<br/>sandbox-only agent"]
-        MCP["Governance MCP harness"]
-        Dashboard["Requester and admin dashboard"]
+        MCP["Python FastMCP<br/>governance harness"]
+        Dashboard["Requester/admin<br/>web browser"]
     end
 
-    subgraph Control["AKS governance control plane"]
-        Assignmentd["assignmentd<br/>2 API replicas<br/>1 elected controller"]
-        Auth["TokenReview and<br/>SandboxPrincipalBinding"]
-        CRDs["Kubernetes CRDs<br/>templates, bundles, tenants,<br/>assignments, access, audit,<br/>revocations and evidence"]
-        OpenSandbox["OpenSandbox server<br/>SQLite on PVC"]
-        Mediator["External mediator / egress probe<br/>trusted Pod-bound identity<br/>decision path only"]
-    end
+    subgraph Azure["Azure subscription"]
+        ACR["Azure Container Registry<br/>assignmentd image and<br/>snapshot artifacts"]
 
-    subgraph Runtime["Governed sandbox runtime"]
-        Kata["Kata-isolated sandbox Pod<br/>no automatic ServiceAccount token"]
-        Cilium["Cilium default-deny<br/>TCP, UDP and DNS"]
-        Workspace["Workspace and snapshot state"]
+        subgraph AKS["Azure Kubernetes Service (AKS)"]
+            subgraph SystemPool["Azure Linux system node pool"]
+                Assignmentd["Go assignmentd Deployment<br/>HTTP lifecycle + broker<br/>gRPC authorization<br/>2 replicas, PDB, leader election"]
+                OpenSandbox["OpenSandbox server<br/>SQLite metadata on PVC"]
+                Ingress["OpenSandbox ingress gateway<br/>HTTP and WebSocket routing"]
+                Mediator["Go egress-probe / external mediator<br/>Pod-bound Kubernetes token<br/>decision path only"]
+                DashboardPod["Go dashboard process<br/>loopback-only POC auth"]
+            end
+
+            KubeAPI["Kubernetes API<br/>CRDs + coordination.k8s.io Leases<br/>TokenReview + ServiceAccounts"]
+            Policy["Governance CRDs<br/>templates, bundles, tenant policies,<br/>principal bindings, assignments,<br/>access, audit, revocations, evidence"]
+            BatchSandbox["OpenSandbox<br/>BatchSandbox CRD"]
+
+            subgraph KataPool["Dedicated AKS Kata user node pool"]
+                Kata["kata-optimized RuntimeClass<br/>KataMshvVmIsolation Pod<br/>digest-pinned Python container<br/>no automatic ServiceAccount token"]
+                Cilium["Cilium CNI<br/>Kubernetes default-deny<br/>NetworkPolicy for TCP, UDP and DNS"]
+                Workspace["Workspace state<br/>pause / snapshot / resume"]
+            end
+        end
     end
 
     Internet["External targets"]
-    Audit["Per-sandbox attributed<br/>decisions and credential events"]
 
     User --> OpenCode --> MCP --> Assignmentd
-    User --> Dashboard
+    User --> Ingress
+    User --> Dashboard --> DashboardPod
     Admin --> Dashboard
-    Dashboard --> Assignmentd
-    Dashboard <--> CRDs
-    Assignmentd --> Auth
-    Assignmentd <--> CRDs
-    Assignmentd --> OpenSandbox --> Kata
+    DashboardPod --> Assignmentd
+    DashboardPod <--> KubeAPI
+    Assignmentd <--> KubeAPI
+    KubeAPI <--> Policy
+    KubeAPI <--> BatchSandbox
+    Assignmentd --> OpenSandbox
+    OpenSandbox --> KubeAPI
+    BatchSandbox --> Kata
+    OpenSandbox <--> Ingress
+    Ingress --> Kata
+    OpenSandbox <--> Workspace
     Kata <--> Workspace
     Kata --- Cilium
     Cilium -->|"blocks direct egress"| Internet
     Kata -.->|"sandbox and Pod context"| Mediator
-    Mediator --> Assignmentd
+    Mediator -->|"gRPC authorization"| Assignmentd
     Assignmentd -.->|"exact allow or deny decision"| Internet
-    Assignmentd --> Audit --> CRDs
+    Assignmentd -->|"audit, grants and revocations"| Policy
+    ACR --> Assignmentd
+    OpenSandbox <--> ACR
 ```
 
 The live POC uses one Azure tenant and one AKS cluster. Logical tenants,
 immutable templates, exact elevation, distributed quota admission, credential
 revocation, snapshot identity rotation, forced-egress denial, and per-sandbox
 attribution are implemented inside that boundary.
+
+| Layer | Technology used in the live POC |
+|---|---|
+| Azure infrastructure | Azure subscription, Azure Kubernetes Service, Azure Container Registry, dedicated system and Kata node pools |
+| Provisioning | Bicep, Azure CLI, GNU Make, `kubectl`, and Helm |
+| Sandbox platform | Upstream OpenSandbox server, `BatchSandbox` CRD, ingress gateway, and pause/snapshot/resume APIs |
+| Compute isolation | AKS `KataMshvVmIsolation` with the `kata-optimized` RuntimeClass |
+| Network enforcement | Cilium CNI and Kubernetes `NetworkPolicy` default-deny rules |
+| Governance service | Go `assignmentd` deployment with two API replicas, a PodDisruptionBudget, and leader-elected reconciliation |
+| Agent integration | OpenCode plus a Python `FastMCP` harness that exposes only governed sandbox tools |
+| Identity and admission | Kubernetes ServiceAccount projected tokens, TokenReview, `SandboxPrincipalBinding`, and per-tenant Kubernetes Leases |
+| Durable POC state | Kubernetes CRDs plus OpenSandbox SQLite on a persistent volume |
+| Credentials and audit | HMAC JWT grants, Kubernetes Secret signing material, revocation/event CRDs, and synchronous fail-closed audit writes |
+| Egress POC | Go `egress-probe` / external mediator and assignmentd gRPC authorization; this proves decisions and attribution, not transparent packet forwarding |
 
 ### Remaining P0 Azure-service architecture
 
