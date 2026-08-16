@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	assignmentv1alpha1 "github.com/chrischangcode/opensandbox-aks-governance-poc/api/assignment/v1alpha1"
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment"
@@ -20,8 +21,9 @@ import (
 )
 
 var (
-	assignmentGVR      = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxassignments"}
-	credentialEventGVR = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxcredentialevents"}
+	assignmentGVR           = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxassignments"}
+	credentialEventGVR      = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxcredentialevents"}
+	credentialRevocationGVR = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxcredentialrevocations"}
 )
 
 type KubernetesGrantValidator struct {
@@ -69,6 +71,69 @@ func (v *KubernetesGrantValidator) ValidateGrant(ctx context.Context, claims Gra
 		return errors.New("sandbox Pod binding is stale")
 	}
 	return nil
+}
+
+type KubernetesRevocationStore struct {
+	dynamic   dynamic.Interface
+	namespace string
+	now       func() time.Time
+}
+
+func NewKubernetesRevocationStore(dynamicClient dynamic.Interface, namespace string) *KubernetesRevocationStore {
+	return &KubernetesRevocationStore{dynamic: dynamicClient, namespace: namespace, now: time.Now}
+}
+
+func (s *KubernetesRevocationStore) Revoke(ctx context.Context, claims GrantClaims) error {
+	value := &assignmentv1alpha1.SandboxCredentialRevocation{
+		TypeMeta: metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxCredentialRevocation"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "grant-" + claims.ID, Namespace: s.namespace,
+			Labels: map[string]string{"aks-sandbox.azure.com/assignment": claims.AssignmentName},
+		},
+		Spec: assignmentv1alpha1.SandboxCredentialRevocationSpec{
+			GrantID: claims.ID, ExpiresAt: metav1.NewTime(claims.ExpiresAt.Time),
+			AssignmentRef: assignmentv1alpha1.AssignmentReference{Name: claims.AssignmentName, UID: types.UID(claims.AssignmentUID)},
+			PodUID:        types.UID(claims.PodUID), SandboxID: claims.SandboxID,
+		},
+	}
+	object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(value)
+	if err != nil {
+		return err
+	}
+	_, err = s.dynamic.Resource(credentialRevocationGVR).Namespace(s.namespace).Create(
+		ctx, &unstructured.Unstructured{Object: object}, metav1.CreateOptions{FieldValidation: metav1.FieldValidationStrict},
+	)
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+func (s *KubernetesRevocationStore) IsRevoked(ctx context.Context, grantID string) (bool, error) {
+	object, err := s.dynamic.Resource(credentialRevocationGVR).Namespace(s.namespace).Get(
+		ctx, "grant-"+grantID, metav1.GetOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	expiresAt, _, _ := unstructured.NestedString(object.Object, "spec", "expiresAt")
+	expiry, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil {
+		return false, err
+	}
+	if !expiry.After(s.now()) {
+		err := s.dynamic.Resource(credentialRevocationGVR).Namespace(s.namespace).Delete(
+			ctx, object.GetName(), metav1.DeleteOptions{},
+		)
+		if apierrors.IsNotFound(err) {
+			err = nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 type KubernetesAuditSink struct {

@@ -15,17 +15,18 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
-func TestCapabilityProfileTransportInjectsCreateExtension(t *testing.T) {
+func TestSandboxTemplateTransportInjectsCreateExtension(t *testing.T) {
 	called := false
-	transport := &capabilityProfileTransport{
-		profile: "coding-default",
+	transport := &sandboxTemplateTransport{
+		template: "python-kata-reader-v2",
 		base: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
 			called = true
 			var value ossandbox.CreateSandboxRequest
 			if err := json.NewDecoder(request.Body).Decode(&value); err != nil {
 				t.Fatal(err)
 			}
-			if value.Extensions[dashboardCapabilityProfileExtension] != "coding-default" {
+			if value.Extensions[dashboardSandboxTemplateExtension] != "python-kata-reader-v2" ||
+				len(value.Extensions) != 1 {
 				t.Fatalf("extensions = %#v", value.Extensions)
 			}
 			return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader(`{}`)), Header: http.Header{}}, nil
@@ -47,10 +48,10 @@ func TestCapabilityProfileTransportInjectsCreateExtension(t *testing.T) {
 	}
 }
 
-func TestCapabilityProfileTransportPassesOtherRequestsUnchanged(t *testing.T) {
+func TestSandboxTemplateTransportPassesOtherRequestsUnchanged(t *testing.T) {
 	original := strings.NewReader("")
-	transport := &capabilityProfileTransport{
-		profile: "coding-default",
+	transport := &sandboxTemplateTransport{
+		template: "python-kata-reader-v2",
 		base: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
 			if request.Method != http.MethodGet || request.URL.Path != "/opensandbox/sandboxes/id" {
 				t.Fatalf("request = %s %s", request.Method, request.URL.Path)

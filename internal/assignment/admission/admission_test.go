@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/fake"
+	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
 func TestAdmissionEnforcesTenantBudgets(t *testing.T) {
@@ -36,14 +37,16 @@ func TestAdmissionEnforcesTenantBudgets(t *testing.T) {
 		},
 	}
 	client := fake.NewSimpleDynamicClient(scheme, bundle, policy)
-	admission := NewKubernetesAdmission(client, "aks-sandbox-system", "opensandbox")
+	admission := NewKubernetesAdmission(client, kubernetesfake.NewSimpleClientset(), "aks-sandbox-system", "opensandbox")
 	timeout := 900
 	request := &ossandbox.CreateSandboxRequest{
 		Timeout: &timeout, ResourceLimits: ossandbox.ResourceLimits{"cpu": "500m", "memory": "512Mi"},
 	}
-	if err := admission.AuthorizeCreate(context.Background(), "team-a-reader", request); err != nil {
+	release, err := admission.AuthorizeCreate(context.Background(), "team-a-reader", request)
+	if err != nil {
 		t.Fatal(err)
 	}
+	release()
 
 	assignment := &assignmentv1alpha1.SandboxAssignment{
 		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxAssignment"},
@@ -53,7 +56,7 @@ func TestAdmissionEnforcesTenantBudgets(t *testing.T) {
 	if _, err := client.Resource(assignmentGVR).Namespace("aks-sandbox-system").Create(context.Background(), toUnstructured(t, assignment), metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := admission.AuthorizeCreate(context.Background(), "team-a-reader", request); err == nil || !strings.Contains(err.Error(), "concurrent") {
+	if _, err := admission.AuthorizeCreate(context.Background(), "team-a-reader", request); err == nil || !strings.Contains(err.Error(), "concurrent") {
 		t.Fatalf("quota error = %v", err)
 	}
 }
@@ -78,9 +81,9 @@ func TestAdmissionRejectsExcessResourcesAndLifetime(t *testing.T) {
 			MaxAccessRequestDurationSeconds: 300, MaxCPU: "500m", MaxMemory: "512Mi", Enabled: true,
 		},
 	}
-	admission := NewKubernetesAdmission(fake.NewSimpleDynamicClient(scheme, bundle, policy), "aks-sandbox-system", "opensandbox")
+	admission := NewKubernetesAdmission(fake.NewSimpleDynamicClient(scheme, bundle, policy), kubernetesfake.NewSimpleClientset(), "aks-sandbox-system", "opensandbox")
 	timeout := 1200
-	err := admission.AuthorizeCreate(context.Background(), "team-a-reader", &ossandbox.CreateSandboxRequest{
+	_, err := admission.AuthorizeCreate(context.Background(), "team-a-reader", &ossandbox.CreateSandboxRequest{
 		Timeout: &timeout, ResourceLimits: ossandbox.ResourceLimits{"cpu": "1", "memory": "1Gi"},
 	})
 	if err == nil {
@@ -108,9 +111,9 @@ func TestAdmissionRejectsLifetimeThatWouldOverflowInt32(t *testing.T) {
 			MaxAccessRequestDurationSeconds: 300, MaxCPU: "500m", MaxMemory: "512Mi", Enabled: true,
 		},
 	}
-	admission := NewKubernetesAdmission(fake.NewSimpleDynamicClient(scheme, bundle, policy), "aks-sandbox-system", "opensandbox")
+	admission := NewKubernetesAdmission(fake.NewSimpleDynamicClient(scheme, bundle, policy), kubernetesfake.NewSimpleClientset(), "aks-sandbox-system", "opensandbox")
 	timeout := int(uint64(1)<<32 + 60)
-	err := admission.AuthorizeCreate(context.Background(), "team-a-reader", &ossandbox.CreateSandboxRequest{
+	_, err := admission.AuthorizeCreate(context.Background(), "team-a-reader", &ossandbox.CreateSandboxRequest{
 		Timeout: &timeout, ResourceLimits: ossandbox.ResourceLimits{"cpu": "500m", "memory": "512Mi"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "lifetime") {

@@ -20,7 +20,8 @@ type config struct {
 	assignmentNamespace  string
 	sandboxImage         string
 	lifecycleEndpoint    string
-	capabilityProfile    string
+	lifecycleTokenFile   string
+	sandboxTemplate      string
 	tenantID             string
 	clientID             string
 	scope                string
@@ -50,7 +51,8 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&cfg.assignmentNamespace, "assignment-namespace", envOr("OSB_DASHBOARD_ASSIGNMENT_NAMESPACE", "aks-sandbox-system"), "namespace containing assignment governance resources")
 	flags.StringVar(&cfg.sandboxImage, "sandbox-image", envOr("OSB_DASHBOARD_SANDBOX_IMAGE", "python:3.12-slim"), "default image used by dashboard create actions")
 	flags.StringVar(&cfg.lifecycleEndpoint, "lifecycle-endpoint", os.Getenv("OSB_DASHBOARD_LIFECYCLE_ENDPOINT"), "optional OpenSandbox lifecycle facade endpoint")
-	flags.StringVar(&cfg.capabilityProfile, "capability-profile", envOr("OSB_DASHBOARD_CAPABILITY_PROFILE", "coding-default"), "capability profile injected into sandbox create requests")
+	flags.StringVar(&cfg.lifecycleTokenFile, "lifecycle-token-file", os.Getenv("OSB_DASHBOARD_LIFECYCLE_TOKEN_FILE"), "projected ServiceAccount token file for the lifecycle facade")
+	flags.StringVar(&cfg.sandboxTemplate, "sandbox-template", envOr("OSB_DASHBOARD_SANDBOX_TEMPLATE", "python-kata-reader-v2"), "administrator-owned sandbox template injected into create requests")
 	flags.StringVar(&cfg.tenantID, "tenant-id", os.Getenv("OSB_DASHBOARD_ENTRA_TENANT_ID"), "dashboard Entra tenant ID")
 	flags.StringVar(&cfg.clientID, "client-id", os.Getenv("OSB_DASHBOARD_ENTRA_CLIENT_ID"), "dashboard Entra application client ID")
 	flags.StringVar(&cfg.scope, "scope", os.Getenv("OSB_DASHBOARD_ENTRA_SCOPE"), "dashboard delegated API scope")
@@ -81,7 +83,7 @@ func parseConfig(args []string) (config, error) {
 	required := map[string]string{
 		"--listen":               cfg.listenAddress,
 		"--redirect-uri":         cfg.redirectURI,
-		"--capability-profile":   cfg.capabilityProfile,
+		"--sandbox-template":     cfg.sandboxTemplate,
 		"--assignment-namespace": cfg.assignmentNamespace,
 		"--admin-role":           cfg.adminRole,
 	}
@@ -106,6 +108,9 @@ func parseConfig(args []string) (config, error) {
 	}
 	if cfg.sessionLifetime <= 0 {
 		return config{}, errors.New("--session-lifetime must be greater than zero")
+	}
+	if cfg.lifecycleEndpoint != "" && strings.TrimSpace(cfg.lifecycleTokenFile) == "" {
+		return config{}, errors.New("--lifecycle-token-file is required with --lifecycle-endpoint")
 	}
 	return cfg, nil
 }

@@ -211,6 +211,13 @@ func (c *KubernetesChecker) Start(ctx context.Context) error {
 // Check validates identity and evaluates one backend allow expression.
 func (c *KubernetesChecker) Check(ctx context.Context, input CheckInput) (decision Decision, err error) {
 	defer func() {
+		if c.audit != nil && decision.AssignmentUID != "" {
+			if auditErr := c.audit.Record(ctx, decision); auditErr != nil && decision.Allow {
+				decision.Allow = false
+				decision.Reason = "authorization audit is unavailable"
+				err = fmt.Errorf("record authorization decision: %w", auditErr)
+			}
+		}
 		switch {
 		case err != nil:
 			c.metrics.errors.Add(1)
@@ -219,9 +226,6 @@ func (c *KubernetesChecker) Check(ctx context.Context, input CheckInput) (decisi
 			c.metrics.allows.Add(1)
 		default:
 			c.metrics.denies.Add(1)
-		}
-		if c.audit != nil && decision.AssignmentUID != "" {
-			c.audit.Enqueue(decision)
 		}
 	}()
 	if !c.fresh() {
@@ -243,7 +247,11 @@ func (c *KubernetesChecker) Check(ctx context.Context, input CheckInput) (decisi
 	if pod.DeletionTimestamp != nil || pod.Namespace != c.workloadNamespace || pod.Namespace != identity.namespace || pod.Name != identity.podName || string(pod.UID) != identity.podUID || pod.Spec.ServiceAccountName != identity.serviceAccount {
 		return Decision{Reason: "token does not match live Pod"}, nil
 	}
-	sourceAddress, err := netip.ParseAddr(input.SourceAddress)
+	effectiveSource := input.SourceAddress
+	if input.DeriveSourceFromIdentity {
+		effectiveSource = pod.Status.PodIP
+	}
+	sourceAddress, err := netip.ParseAddr(effectiveSource)
 	if err != nil || !sourceMatchesPod(sourceAddress.Unmap(), pod) {
 		return Decision{Reason: "request source does not match token Pod"}, nil
 	}
@@ -341,7 +349,7 @@ func (c *KubernetesChecker) Check(ctx context.Context, input CheckInput) (decisi
 		result, _, err := program.Eval(map[string]any{
 			"backend": map[string]any{"name": input.Backend},
 			"request": map[string]any{"method": input.Method, "host": input.Host, "path": input.Path, "headers": input.Headers},
-			"source":  map[string]any{"address": input.SourceAddress},
+			"source":  map[string]any{"address": effectiveSource},
 		})
 		if err != nil {
 			c.metrics.celErrors.Add(1)

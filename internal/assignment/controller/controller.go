@@ -48,6 +48,7 @@ const (
 var (
 	assignmentsGVR = schema.GroupVersionResource{Group: "aks-sandbox.azure.com", Version: "v1alpha1", Resource: "sandboxassignments"}
 	bundlesGVR     = schema.GroupVersionResource{Group: "aks-sandbox.azure.com", Version: "v1alpha1", Resource: "capabilitybundles"}
+	templatesGVR   = schema.GroupVersionResource{Group: "aks-sandbox.azure.com", Version: "v1alpha1", Resource: "sandboxtemplates"}
 	workloadsGVR   = schema.GroupVersionResource{Group: "sandbox.opensandbox.io", Version: "v1alpha1", Resource: "batchsandboxes"}
 	poolsGVR       = schema.GroupVersionResource{Group: "sandbox.opensandbox.io", Version: "v1alpha1", Resource: "pools"}
 )
@@ -142,6 +143,30 @@ func (c *Controller) reconcile(ctx context.Context, object *unstructured.Unstruc
 		return err
 	}
 	bundleName := typedAssignment.Spec.CapabilityBundleRef.Name
+	var resolvedTemplate *assignmentv1alpha1.SandboxTemplate
+	if typedAssignment.Spec.TemplateRef.Name != "" {
+		templateObject, err := c.dynamic.Resource(templatesGVR).Namespace(c.config.AssignmentNamespace).Get(
+			ctx, typedAssignment.Spec.TemplateRef.Name, metav1.GetOptions{},
+		)
+		if err != nil || templateObject.GetDeletionTimestamp() != nil {
+			return c.updateStatus(ctx, object, nil, nil, nil, progressConditions(object, false, false, false, "TemplateNotFound", "sandbox template is unavailable"))
+		}
+		if string(templateObject.GetUID()) != string(typedAssignment.Spec.TemplateRef.UID) {
+			return c.updateStatus(ctx, object, nil, nil, nil, progressConditions(object, false, false, false, "TemplateReplaced", "sandbox template incarnation changed"))
+		}
+		templateRevision, err := policyRevision(templateObject)
+		if err != nil || templateRevision != typedAssignment.Spec.TemplateRef.SpecRevision {
+			return c.updateStatus(ctx, object, nil, nil, nil, progressConditions(object, false, false, false, "TemplateRevisionMismatch", "sandbox template revision changed"))
+		}
+		resolvedTemplate = &assignmentv1alpha1.SandboxTemplate{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(templateObject.Object, resolvedTemplate); err != nil {
+			return err
+		}
+		if !resolvedTemplate.Spec.Enabled ||
+			resolvedTemplate.Spec.CapabilityBundleRef.Name != bundleName {
+			return c.updateStatus(ctx, object, nil, nil, nil, progressConditions(object, false, false, false, "TemplateInvalid", "sandbox template is disabled or selects a different capability bundle"))
+		}
+	}
 	bundle, err := c.dynamic.Resource(bundlesGVR).Namespace(c.config.AssignmentNamespace).Get(ctx, bundleName, metav1.GetOptions{})
 	if err != nil || bundle.GetDeletionTimestamp() != nil {
 		return c.updateStatus(ctx, object, nil, nil, nil, progressConditions(object, false, false, false, "BundleNotFound", "capability bundle is unavailable"))
@@ -165,6 +190,13 @@ func (c *Controller) reconcile(ctx context.Context, object *unstructured.Unstruc
 	if err != nil {
 		return err
 	}
+	if resolvedTemplate != nil &&
+		(resolvedTemplate.Spec.CapabilityBundleRef.PolicyRevision != revision ||
+			typedAssignment.Spec.LogicalTenant == "" ||
+			typedBundle.Spec.Governance == nil ||
+			typedAssignment.Spec.LogicalTenant != typedBundle.Spec.Governance.LogicalTenant) {
+		return c.updateStatus(ctx, object, nil, nil, nil, progressConditions(object, false, false, false, "TemplateBoundaryMismatch", "sandbox template, assignment tenant, and capability revision do not match"))
+	}
 	resolved := map[string]any{"name": bundle.GetName(), "uid": string(bundle.GetUID()), "policyRevision": revision}
 	identityRequired := typedBundle.Spec.Egress != nil && len(typedBundle.Spec.Egress.Agentgateway) > 0
 	if object.GetAnnotations()[assignment.PausedAnnotation] == "true" {
@@ -186,6 +218,25 @@ func (c *Controller) reconcile(ctx context.Context, object *unstructured.Unstruc
 		return c.updateStatus(ctx, object, resolved, nil, nil, progressConditions(object, true, false, false, reason, message))
 	}
 	workload := &workloads[0]
+	if object.GetAnnotations()[assignment.SandboxIDAnnotation] == "" {
+		copy := object.DeepCopy()
+		annotations := copy.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[assignment.SandboxIDAnnotation] = workload.GetName()
+		copy.SetAnnotations(annotations)
+		labels := copy.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels[assignment.SandboxIDLabel] = workload.GetName()
+		copy.SetLabels(labels)
+		_, err := c.dynamic.Resource(assignmentsGVR).Namespace(c.config.AssignmentNamespace).Update(
+			ctx, copy, metav1.UpdateOptions{},
+		)
+		return err
+	}
 	replicas, found, _ := unstructured.NestedInt64(workload.Object, "spec", "replicas")
 	if !found || replicas != 1 {
 		return c.updateStatus(ctx, object, resolved, workloadReference(workload), nil, progressConditions(object, true, false, false, "InvalidReplicaCount", "BatchSandbox must request exactly one Pod"))

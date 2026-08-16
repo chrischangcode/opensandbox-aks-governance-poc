@@ -17,38 +17,26 @@ import (
 	"k8s.io/client-go/dynamic/fake"
 )
 
-func TestAuditSinkQueueOverflowDoesNotBlock(t *testing.T) {
+func TestAuditSinkWritesThroughBeforeReturning(t *testing.T) {
 	sink := newFakeAuditSink(t, 1)
 	decision := validAuditDecision()
-	if !sink.Enqueue(decision) {
-		t.Fatal("first audit decision was dropped")
-	}
-	if sink.Enqueue(decision) {
-		t.Fatal("second audit decision unexpectedly fit in full queue")
+	if err := sink.Record(context.Background(), decision); err != nil {
+		t.Fatal(err)
 	}
 	metrics := sink.Metrics()
-	if metrics.Enqueued != 1 || metrics.Dropped != 1 {
+	if metrics.Enqueued != 1 || metrics.Written != 1 || metrics.Dropped != 0 {
 		t.Fatalf("metrics = %+v", metrics)
 	}
 }
 
 func TestAuditSinkWritesSanitizedEvent(t *testing.T) {
 	sink := newFakeAuditSink(t, 2)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	decisionTime := time.Date(2026, time.August, 15, 19, 0, 0, 0, time.UTC)
 	sink.now = func() time.Time { return decisionTime }
 	decision := validAuditDecision()
 	decision.Reason = "denied\nsecret"
-	if !sink.Enqueue(decision) {
-		t.Fatal("audit decision was dropped")
-	}
-	sink.now = func() time.Time { return decisionTime.Add(time.Hour) }
-	sink.Start(ctx)
-
-	deadline := time.Now().Add(2 * time.Second)
-	for sink.Metrics().Written == 0 && sink.Metrics().Errors == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	if err := sink.Record(context.Background(), decision); err != nil {
+		t.Fatal(err)
 	}
 	if metrics := sink.Metrics(); metrics.Written != 1 || metrics.Errors != 0 {
 		t.Fatalf("metrics = %+v", metrics)
@@ -73,22 +61,14 @@ func TestAuditSinkWritesSanitizedEvent(t *testing.T) {
 	}
 }
 
-func TestAuditSinkShutdownDrainsQueue(t *testing.T) {
+func TestAuditSinkRejectsRecordsAfterShutdown(t *testing.T) {
 	sink := newFakeAuditSink(t, 2)
-	sink.Start(context.Background())
-	if !sink.Enqueue(validAuditDecision()) {
-		t.Fatal("audit decision was dropped")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := sink.Shutdown(ctx); err != nil {
 		t.Fatal(err)
 	}
-	metrics := sink.Metrics()
-	if metrics.Written != 1 || metrics.Dropped != 0 {
-		t.Fatalf("metrics = %+v", metrics)
-	}
-	if sink.Enqueue(validAuditDecision()) {
+	if err := sink.Record(context.Background(), validAuditDecision()); err == nil {
 		t.Fatal("audit sink accepted a record after shutdown")
 	}
 }

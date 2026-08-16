@@ -7,19 +7,23 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	nodev1 "k8s.io/api/node/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
 func TestRunnerReportsReadyContract(t *testing.T) {
 	automount := false
-	ready := int32(1)
+	ready := int32(2)
+	minAvailable := intstr.FromInt32(1)
 	kube := kubernetesfake.NewSimpleClientset(
 		&nodev1.RuntimeClass{
 			ObjectMeta: metav1.ObjectMeta{Name: "kata-optimized"},
@@ -37,12 +41,54 @@ func TestRunnerReportsReadyContract(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "assignmentd", Namespace: "aks-sandbox-system"},
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &ready,
-				Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
+				Strategy: appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType},
 				Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name: "assignmentd", Env: []corev1.EnvVar{{Name: "ASSIGNMENTD_EGRESS_IDENTITY_MODE", Value: "external-mediator"}},
 				}}}},
 			},
-			Status: appsv1.DeploymentStatus{ReadyReplicas: 1},
+			Status: appsv1.DeploymentStatus{ReadyReplicas: 2},
+		},
+		&policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Name: "assignmentd", Namespace: "aks-sandbox-system"},
+			Spec:       policyv1.PodDisruptionBudgetSpec{MinAvailable: &minAvailable},
+		},
+		&rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{Name: "assignmentd", Namespace: "aks-sandbox-system"},
+			Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{"coordination.k8s.io"},
+				Resources: []string{"leases"},
+				Verbs:     []string{"create", "get", "update", "patch", "delete"},
+			}},
+		},
+		&rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "assignmentd", Namespace: "aks-sandbox-system"},
+			RoleRef:    rbacv1.RoleRef{Kind: "Role", Name: "assignmentd"},
+			Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Namespace: "aks-sandbox-system", Name: "assignmentd"}},
+		},
+		&rbacv1.ClusterRole{
+			ObjectMeta: metav1.ObjectMeta{Name: "assignmentd-tokenreview"},
+			Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{"authentication.k8s.io"},
+				Resources: []string{"tokenreviews"},
+				Verbs:     []string{"create"},
+			}},
+		},
+		&rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "assignmentd-tokenreview"},
+			RoleRef:    rbacv1.RoleRef{Kind: "ClusterRole", Name: "assignmentd-tokenreview"},
+			Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Namespace: "aks-sandbox-system", Name: "assignmentd"}},
+		},
+		&rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{Name: "assignmentd-workloads", Namespace: "opensandbox"},
+			Rules: []rbacv1.PolicyRule{
+				{APIGroups: []string{"sandbox.opensandbox.io"}, Resources: []string{"batchsandboxes"}, Verbs: []string{"get", "list", "watch", "delete"}},
+				{APIGroups: []string{""}, Resources: []string{"pods", "serviceaccounts"}, Verbs: []string{"get", "list", "watch"}},
+			},
+		},
+		&rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "assignmentd-workloads", Namespace: "opensandbox"},
+			RoleRef:    rbacv1.RoleRef{Kind: "Role", Name: "assignmentd-workloads"},
+			Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Namespace: "aks-sandbox-system", Name: "assignmentd"}},
 		},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "assignmentd", Namespace: "aks-sandbox-system"}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "opensandbox-server", Namespace: "opensandbox"}},
@@ -59,7 +105,9 @@ func TestRunnerReportsReadyContract(t *testing.T) {
 		"sandboxaccessrequests.aks-sandbox.azure.com",
 		"sandboxassignments.aks-sandbox.azure.com",
 		"sandboxcredentialevents.aks-sandbox.azure.com",
+		"sandboxcredentialrevocations.aks-sandbox.azure.com",
 		"sandboxegressevents.aks-sandbox.azure.com",
+		"sandboxprincipalbindings.aks-sandbox.azure.com",
 		"sandboxtemplates.aks-sandbox.azure.com",
 		"sandboxtenantpolicies.aks-sandbox.azure.com",
 		"sandboxvalidationruns.aks-sandbox.azure.com",

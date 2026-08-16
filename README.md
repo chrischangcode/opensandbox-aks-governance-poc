@@ -23,6 +23,9 @@ It extends the public [AKS Kata example](https://github.com/opensandbox-group/Op
 
 [Open the visual live-demo report](docs/live-demo-report.md), including the
 architecture, exact redacted commands, terminal transcripts, and replay steps.
+The [P0 managed-service boundary findings](docs/p0-service-boundary-findings.md)
+summarize the security, durability, tenancy, egress, credential, and operability
+experiments and the remaining Azure service work.
 
 | Running Kata sandbox | Administrator capability editor |
 |---|---|
@@ -281,9 +284,9 @@ become ready and mediated egress is denied.
 - Validation resources retain output hashes instead of unrestricted logs.
 - Tenant admission fails closed when the requested logical tenant has no
   enabled policy revision.
-- `assignmentd` is intentionally a singleton with `Recreate` rollout strategy,
-  so the budget check and assignment reservation are serialized without a
-  rolling-update overlap.
+- `assignmentd` runs two API replicas with `RollingUpdate`, a PodDisruptionBudget,
+  controller leader election, and per-tenant Kubernetes Leases that serialize
+  budget admission across replicas.
 - Audit events omit headers, query strings, bodies, credentials, tokens, and source IPs.
 - The asynchronous audit queue cannot turn a valid allow into a deny.
 - Logical tenants in this POC are governance labels, not Azure tenant or Kubernetes namespace isolation.

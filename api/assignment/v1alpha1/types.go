@@ -161,6 +161,33 @@ type SandboxTenantPolicySpec struct {
 	Enabled                         bool     `json:"enabled"`
 }
 
+// SandboxPrincipalBinding maps one authenticated Entra principal to logical
+// tenant scopes used by the requester and administrator workflows.
+// +kubebuilder:object:root=true
+type SandboxPrincipalBinding struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              SandboxPrincipalBindingSpec `json:"spec"`
+}
+
+// SandboxPrincipalBindingList is a list of SandboxPrincipalBinding resources.
+// +kubebuilder:object:root=true
+type SandboxPrincipalBindingList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []SandboxPrincipalBinding `json:"items"`
+}
+
+// SandboxPrincipalBindingSpec contains immutable principal-to-tenant scopes.
+type SandboxPrincipalBindingSpec struct {
+	TenantID                string   `json:"tenantId,omitempty"`
+	ObjectID                string   `json:"objectId,omitempty"`
+	ServiceAccountNamespace string   `json:"serviceAccountNamespace,omitempty"`
+	ServiceAccountName      string   `json:"serviceAccountName,omitempty"`
+	RequesterTenants        []string `json:"requesterTenants,omitempty"`
+	AdminTenants            []string `json:"adminTenants,omitempty"`
+}
+
 // SandboxAssignment binds one capability bundle to one sandbox Pod incarnation.
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -179,9 +206,19 @@ type SandboxAssignmentList struct {
 	Items           []SandboxAssignment `json:"items"`
 }
 
-// SandboxAssignmentSpec contains only the selected immutable bundle reference.
+// SandboxAssignmentSpec records the server-resolved immutable template and
+// capability boundary for one sandbox.
 type SandboxAssignmentSpec struct {
+	TemplateRef         SandboxTemplateReference  `json:"templateRef"`
+	LogicalTenant       string                    `json:"logicalTenant"`
 	CapabilityBundleRef CapabilityBundleReference `json:"capabilityBundleRef"`
+}
+
+// SandboxTemplateReference identifies an immutable template incarnation.
+type SandboxTemplateReference struct {
+	Name         string    `json:"name"`
+	UID          types.UID `json:"uid"`
+	SpecRevision string    `json:"specRevision"`
 }
 
 // CapabilityBundleReference names a bundle in the assignment namespace.
@@ -403,17 +440,44 @@ type SandboxCredentialEventSpec struct {
 	ExpiresAt                metav1.Time         `json:"expiresAt"`
 }
 
+// SandboxCredentialRevocation durably revokes one broker grant.
+// +kubebuilder:object:root=true
+type SandboxCredentialRevocation struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              SandboxCredentialRevocationSpec `json:"spec"`
+}
+
+// SandboxCredentialRevocationList is a list of SandboxCredentialRevocation resources.
+// +kubebuilder:object:root=true
+type SandboxCredentialRevocationList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []SandboxCredentialRevocation `json:"items"`
+}
+
+// SandboxCredentialRevocationSpec contains no credential material.
+type SandboxCredentialRevocationSpec struct {
+	GrantID       string              `json:"grantId"`
+	ExpiresAt     metav1.Time         `json:"expiresAt"`
+	AssignmentRef AssignmentReference `json:"assignmentRef"`
+	PodUID        types.UID           `json:"podUid"`
+	SandboxID     string              `json:"sandboxId"`
+}
+
 // AddToScheme registers assignment resources in a runtime Scheme.
 func AddToScheme(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(GroupVersion,
 		&CapabilityBundle{}, &CapabilityBundleList{},
 		&SandboxTemplate{}, &SandboxTemplateList{},
 		&SandboxTenantPolicy{}, &SandboxTenantPolicyList{},
+		&SandboxPrincipalBinding{}, &SandboxPrincipalBindingList{},
 		&SandboxAssignment{}, &SandboxAssignmentList{},
 		&SandboxAccessRequest{}, &SandboxAccessRequestList{},
 		&SandboxEgressEvent{}, &SandboxEgressEventList{},
 		&SandboxValidationRun{}, &SandboxValidationRunList{},
 		&SandboxCredentialEvent{}, &SandboxCredentialEventList{},
+		&SandboxCredentialRevocation{}, &SandboxCredentialRevocationList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

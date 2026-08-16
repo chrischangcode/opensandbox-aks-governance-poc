@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-default-deny-egress
+  namespace: opensandbox
+spec:
+  podSelector:
+    matchExpressions:
+      - key: aks-sandbox.azure.com/assignment
+        operator: Exists
+  policyTypes: [Egress]
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-allow-assignmentd
+  namespace: opensandbox
+spec:
+  podSelector:
+    matchExpressions:
+      - key: aks-sandbox.azure.com/assignment
+        operator: Exists
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aks-sandbox-system
+          podSelector:
+            matchLabels:
+              app: assignmentd
+      ports:
+        - {protocol: TCP, port: 8080}
+        - {protocol: TCP, port: 9001}

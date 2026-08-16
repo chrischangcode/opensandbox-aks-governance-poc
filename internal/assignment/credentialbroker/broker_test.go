@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -42,16 +41,35 @@ func (m *memoryAudit) Record(_ context.Context, event AuditEvent) error {
 	return nil
 }
 
+type memoryRevocations struct {
+	values map[string]time.Time
+}
+
+func newMemoryRevocations() *memoryRevocations {
+	return &memoryRevocations{values: map[string]time.Time{}}
+}
+
+func (m *memoryRevocations) Revoke(_ context.Context, claims GrantClaims) error {
+	m.values[claims.ID] = claims.ExpiresAt.Time
+	return nil
+}
+
+func (m *memoryRevocations) IsRevoked(_ context.Context, grantID string) (bool, error) {
+	_, ok := m.values[grantID]
+	return ok, nil
+}
+
 func TestBrokerIssuesVerifiesAndRevokesExactCredential(t *testing.T) {
 	validator := &staticValidator{}
 	audit := &memoryAudit{}
+	revocations := newMemoryRevocations()
 	broker, err := New(staticChecker{decision: authz.Decision{
 		Allow: true, Source: assignmentv1alpha1.DecisionSourceBundle,
 		AssignmentName: "assignment-a", AssignmentUID: "assignment-uid",
 		SandboxID: "sandbox-a", PodUID: "pod-uid",
 		CapabilityBundleName: "coding", CapabilityBundleRevision: "sha256:0123456789",
 		Backend: "source-control", Method: "GET", Host: "github.com", Path: "/org/repo",
-	}}, validator, audit, Config{SigningKey: bytes.Repeat([]byte("k"), 32)}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}}, validator, audit, revocations, Config{SigningKey: bytes.Repeat([]byte("k"), 32)}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,8 +77,8 @@ func TestBrokerIssuesVerifiesAndRevokesExactCredential(t *testing.T) {
 	broker.now = func() time.Time { return now }
 
 	issue := request(t, broker, http.MethodPost, "/broker/v1/credentials", map[string]any{
-		"identityToken": "pod-token", "sourceAddress": "10.2.3.4",
-		"backend": "source-control", "method": "GET", "host": "github.com",
+		"identityToken": "pod-token",
+		"backend":       "source-control", "method": "GET", "host": "github.com",
 		"path": "/org/repo", "taskId": "validate-123", "ttlSeconds": 300,
 	}, "")
 	if issue.Code != http.StatusCreated {
@@ -81,22 +99,16 @@ func TestBrokerIssuesVerifiesAndRevokesExactCredential(t *testing.T) {
 		t.Fatalf("verify status=%d audit=%v body=%s", verify.Code, audit.actions, verify.Body.String())
 	}
 
-	broker.mu.Lock()
-	for index := range 4096 {
-		broker.revoked[fmt.Sprintf("existing-%d", index)] = now.Add(time.Hour)
-	}
-	broker.mu.Unlock()
 	revoke := request(t, broker, http.MethodPost, "/broker/v1/revoke", nil, credential)
 	if revoke.Code != http.StatusNoContent {
 		t.Fatalf("revoke status=%d body=%s", revoke.Code, revoke.Body.String())
 	}
-	broker.mu.Lock()
-	_, retained := broker.revoked["existing-0"]
-	broker.mu.Unlock()
-	if !retained {
-		t.Fatal("an unexpired revocation was discarded")
+	secondBroker, err := New(broker.checker, validator, audit, revocations, broker.config, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	verify = request(t, broker, http.MethodPost, "/broker/v1/verify", nil, credential)
+	secondBroker.now = broker.now
+	verify = request(t, secondBroker, http.MethodPost, "/broker/v1/verify", nil, credential)
 	if verify.Code != http.StatusUnauthorized {
 		t.Fatalf("revoked verify status=%d body=%s", verify.Code, verify.Body.String())
 	}
@@ -109,13 +121,13 @@ func TestBrokerRejectsCredentialAfterSandboxBindingChanges(t *testing.T) {
 		SandboxID: "sandbox-a", PodUID: "old-pod", CapabilityBundleName: "coding",
 		CapabilityBundleRevision: "sha256:0123456789",
 		Backend:                  "source-control", Method: "GET", Host: "github.com", Path: "/org/repo",
-	}}, validator, nil, Config{SigningKey: bytes.Repeat([]byte("k"), 32)}, nil)
+	}}, validator, nil, newMemoryRevocations(), Config{SigningKey: bytes.Repeat([]byte("k"), 32)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	issue := request(t, broker, http.MethodPost, "/broker/v1/credentials", map[string]any{
-		"identityToken": "pod-token", "sourceAddress": "10.2.3.4",
-		"backend": "source-control", "method": "GET", "host": "github.com",
+		"identityToken": "pod-token",
+		"backend":       "source-control", "method": "GET", "host": "github.com",
 		"path": "/org/repo", "taskId": "validate-123", "ttlSeconds": 300,
 	}, "")
 	var issued map[string]any
@@ -126,6 +138,48 @@ func TestBrokerRejectsCredentialAfterSandboxBindingChanges(t *testing.T) {
 	verify := request(t, broker, http.MethodPost, "/broker/v1/verify", nil, issued["credential"].(string))
 	if verify.Code != http.StatusUnauthorized {
 		t.Fatalf("verify status=%d body=%s", verify.Code, verify.Body.String())
+	}
+}
+
+func TestBrokerAcceptsPreviousKeyDuringRotation(t *testing.T) {
+	decision := authz.Decision{
+		Allow: true, AssignmentName: "assignment-a", AssignmentUID: "assignment-uid",
+		SandboxID: "sandbox-a", PodUID: "pod-uid", CapabilityBundleName: "coding",
+		CapabilityBundleRevision: "sha256:0123456789",
+		Backend:                  "source-control", Method: "GET", Host: "github.com", Path: "/org/repo",
+	}
+	oldKey := bytes.Repeat([]byte("o"), 32)
+	newKey := bytes.Repeat([]byte("n"), 32)
+	revocations := newMemoryRevocations()
+	oldBroker, err := New(
+		staticChecker{decision: decision}, &staticValidator{}, nil, revocations,
+		Config{SigningKey: oldKey, SigningKeyID: "old"}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	oldBroker.now = func() time.Time { return now }
+	issue := request(t, oldBroker, http.MethodPost, "/broker/v1/credentials", map[string]any{
+		"identityToken": "pod-token",
+		"backend":       "source-control", "method": "GET", "host": "github.com",
+		"path": "/org/repo", "taskId": "rotation-test", "ttlSeconds": 300,
+	}, "")
+	var issued map[string]any
+	if err := json.Unmarshal(issue.Body.Bytes(), &issued); err != nil {
+		t.Fatal(err)
+	}
+	rotatedBroker, err := New(
+		staticChecker{decision: decision}, &staticValidator{}, nil, revocations,
+		Config{SigningKey: newKey, SigningKeyID: "new", PreviousSigningKeys: map[string][]byte{"old": oldKey}}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedBroker.now = oldBroker.now
+	verify := request(t, rotatedBroker, http.MethodPost, "/broker/v1/verify", nil, issued["credential"].(string))
+	if verify.Code != http.StatusOK {
+		t.Fatalf("rotated verify status=%d body=%s", verify.Code, verify.Body.String())
 	}
 }
 

@@ -6,24 +6,44 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	ossandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+	"github.com/google/uuid"
 )
 
 const (
-	dashboardCapabilityProfileExtension = "aks-sandbox.azure.com/capabilityProfile"
-	maxDashboardCreateBodyBytes         = 4 << 20
+	dashboardSandboxTemplateExtension = "aks-sandbox.azure.com/template"
+	maxDashboardCreateBodyBytes       = 4 << 20
 )
 
-type capabilityProfileTransport struct {
-	base    http.RoundTripper
-	profile string
+type sandboxTemplateTransport struct {
+	base      http.RoundTripper
+	template  string
+	tokenFile string
 }
 
-func (t *capabilityProfileTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request.Method != http.MethodPost || !strings.HasSuffix(request.URL.Path, "/sandboxes") {
-		return t.base.RoundTrip(request)
+func (t *sandboxTemplateTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	isCreate := request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/sandboxes")
+	if isCreate && request.Header.Get("Idempotency-Key") == "" {
+		request.Header.Set("Idempotency-Key", uuid.NewString())
+	}
+	outbound := request.Clone(request.Context())
+	outbound.Header = request.Header.Clone()
+	if t.tokenFile != "" {
+		token, err := os.ReadFile(t.tokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("read lifecycle caller token: %w", err)
+		}
+		value := strings.TrimSpace(string(token))
+		if value == "" {
+			return nil, fmt.Errorf("lifecycle caller token is empty")
+		}
+		outbound.Header.Set("Authorization", "Bearer "+value)
+	}
+	if !isCreate {
+		return t.base.RoundTrip(outbound)
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxDashboardCreateBodyBytes+1))
 	if err != nil {
@@ -39,13 +59,13 @@ func (t *capabilityProfileTransport) RoundTrip(request *http.Request) (*http.Res
 	if createRequest.Extensions == nil {
 		createRequest.Extensions = map[string]string{}
 	}
-	createRequest.Extensions[dashboardCapabilityProfileExtension] = t.profile
+	createRequest.Extensions = map[string]string{
+		dashboardSandboxTemplateExtension: t.template,
+	}
 	body, err = json.Marshal(createRequest)
 	if err != nil {
 		return nil, fmt.Errorf("encode OpenSandbox create request: %w", err)
 	}
-	outbound := request.Clone(request.Context())
-	outbound.Header = request.Header.Clone()
 	outbound.Body = io.NopCloser(bytes.NewReader(body))
 	outbound.ContentLength = int64(len(body))
 	outbound.GetBody = func() (io.ReadCloser, error) {

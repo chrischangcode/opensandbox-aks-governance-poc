@@ -6,10 +6,18 @@ export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 
 forward_pids=()
 forward_port=""
+assignmentd_token_file=""
+token_refresh_pid=""
 cleanup() {
   for pid in "${forward_pids[@]}"; do
     kill "$pid" 2>/dev/null || true
   done
+  if [[ -n "$token_refresh_pid" ]]; then
+    kill "$token_refresh_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$assignmentd_token_file" ]]; then
+    rm -f "$assignmentd_token_file" "${assignmentd_token_file}.next"
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -48,6 +56,22 @@ start_random_forward() {
 start_random_forward 8080 -n aks-sandbox-system svc/assignmentd
 export ASSIGNMENTD_URL="http://127.0.0.1:${forward_port}/opensandbox"
 export CREDENTIAL_BROKER_URL="http://127.0.0.1:${forward_port}/broker"
+assignmentd_token_file="$(mktemp)"
+refresh_assignmentd_token() {
+  local next_file="${assignmentd_token_file}.next"
+  kubectl --kubeconfig "$KUBECONFIG" -n aks-sandbox-system create token assignmentd-harness \
+    --audience aks-sandbox-lifecycle --duration 15m >"$next_file"
+  chmod 600 "$next_file"
+  mv -f "$next_file" "$assignmentd_token_file"
+}
+refresh_assignmentd_token
+(
+  while sleep 300; do
+    refresh_assignmentd_token
+  done
+) &
+token_refresh_pid="$!"
+export ASSIGNMENTD_TOKEN_FILE="$assignmentd_token_file"
 
 start_random_forward 8080 -n opensandbox svc/opensandbox-server
 export OPEN_SANDBOX_DOMAIN="127.0.0.1:${forward_port}"
@@ -83,5 +107,5 @@ if [[ -z "${OPEN_SANDBOX_API_KEY:-}" ]]; then
   OPEN_SANDBOX_API_KEY="$(printf '%s' "$encoded" | base64 --decode)"
 fi
 
-exec uv run --quiet --project "$repo_root/harness" \
+uv run --quiet --project "$repo_root/harness" \
   python "$repo_root/harness/server.py"

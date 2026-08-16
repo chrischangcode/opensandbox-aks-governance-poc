@@ -30,14 +30,15 @@ import (
 const governanceBodyLimit = 16 << 10
 
 var (
-	dashboardAssignmentsGVR    = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxassignments"}
-	dashboardBundlesGVR        = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "capabilitybundles"}
-	dashboardRequestsGVR       = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxaccessrequests"}
-	dashboardEventsGVR         = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxegressevents"}
-	dashboardTemplatesGVR      = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxtemplates"}
-	dashboardCredentialsGVR    = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxcredentialevents"}
-	dashboardValidationsGVR    = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxvalidationruns"}
-	dashboardTenantPoliciesGVR = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxtenantpolicies"}
+	dashboardAssignmentsGVR       = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxassignments"}
+	dashboardBundlesGVR           = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "capabilitybundles"}
+	dashboardRequestsGVR          = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxaccessrequests"}
+	dashboardEventsGVR            = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxegressevents"}
+	dashboardTemplatesGVR         = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxtemplates"}
+	dashboardCredentialsGVR       = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxcredentialevents"}
+	dashboardValidationsGVR       = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxvalidationruns"}
+	dashboardTenantPoliciesGVR    = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxtenantpolicies"}
+	dashboardPrincipalBindingsGVR = schema.GroupVersionResource{Group: assignmentv1alpha1.GroupName, Version: assignmentv1alpha1.Version, Resource: "sandboxprincipalbindings"}
 )
 
 type governanceDashboard struct {
@@ -193,12 +194,17 @@ func (g *governanceDashboard) accessPage(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	assignments, err := g.assignmentRows(r.Context())
+	scopes, err := g.principalScopes(r.Context(), identity)
+	if err != nil || len(scopes.requester) == 0 {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	assignments, err := g.assignmentRows(r.Context(), scopes.requester)
 	if err != nil {
 		g.internalError(w, r, "list assignments", err)
 		return
 	}
-	events, err := g.eventRows(r.Context(), true)
+	events, err := g.eventRows(r.Context(), true, scopes.requester)
 	if err != nil {
 		g.internalError(w, r, "list denied egress events", err)
 		return
@@ -237,7 +243,7 @@ func (g *governanceDashboard) adminPage(w http.ResponseWriter, r *http.Request) 
 		g.internalError(w, r, "list access requests", err)
 		return
 	}
-	assignments, err := g.assignmentRows(r.Context())
+	assignments, err := g.assignmentRows(r.Context(), nil)
 	if err != nil {
 		g.internalError(w, r, "list assignments", err)
 		return
@@ -247,7 +253,7 @@ func (g *governanceDashboard) adminPage(w http.ResponseWriter, r *http.Request) 
 		g.internalError(w, r, "list capability bundles", err)
 		return
 	}
-	events, err := g.eventRows(r.Context(), false)
+	events, err := g.eventRows(r.Context(), false, nil)
 	if err != nil {
 		g.internalError(w, r, "list egress events", err)
 		return
@@ -292,6 +298,11 @@ func (g *governanceDashboard) createAccessRequest(w http.ResponseWriter, r *http
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	scopes, err := g.principalScopes(r.Context(), identity)
+	if err != nil || len(scopes.requester) == 0 {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	form, ok := g.parseMutation(w, r, "csrf", "eventName", "reason", "durationMinutes")
 	if !ok {
 		return
@@ -320,6 +331,10 @@ func (g *governanceDashboard) createAccessRequest(w http.ResponseWriter, r *http
 	}
 	if event.Spec.Allowed || event.Spec.DecisionSource != assignmentv1alpha1.DecisionSourceDeny {
 		http.Error(w, "Access can only be requested from a denied event", http.StatusConflict)
+		return
+	}
+	if !tenantAllowed(scopes.requester, event.Spec.LogicalTenant) {
+		http.Error(w, "Denied event belongs to another logical tenant", http.StatusForbidden)
 		return
 	}
 	target, err := governance.NormalizeTarget(event.Spec.Backend, event.Spec.Method, event.Spec.Host, event.Spec.Path)
@@ -428,6 +443,11 @@ func (g *governanceDashboard) approveAccessRequest(w http.ResponseWriter, r *htt
 	if !ok {
 		return
 	}
+	scopes, err := g.principalScopes(r.Context(), identity)
+	if err != nil || !tenantAllowed(scopes.admin, request.Spec.Requester.LogicalTenant) {
+		http.Error(w, "Administrator is not authorized for this logical tenant", http.StatusForbidden)
+		return
+	}
 	if err := governance.ValidateAccessRequestSpec(request.Spec); err != nil {
 		http.Error(w, "Access request is invalid", http.StatusConflict)
 		return
@@ -502,6 +522,11 @@ func (g *governanceDashboard) denyAccessRequest(w http.ResponseWriter, r *http.R
 	}
 	object, request, ok := g.pendingRequest(w, r, r.PathValue("name"))
 	if !ok {
+		return
+	}
+	scopes, err := g.principalScopes(r.Context(), identity)
+	if err != nil || !tenantAllowed(scopes.admin, request.Spec.Requester.LogicalTenant) {
+		http.Error(w, "Administrator is not authorized for this logical tenant", http.StatusForbidden)
 		return
 	}
 	approver, err := governanceIdentity(identity, "", "")
@@ -679,7 +704,7 @@ func (g *governanceDashboard) updateRequestStatus(ctx context.Context, object *u
 	return err
 }
 
-func (g *governanceDashboard) assignmentRows(ctx context.Context) ([]assignmentPageRow, error) {
+func (g *governanceDashboard) assignmentRows(ctx context.Context, tenants map[string]struct{}) ([]assignmentPageRow, error) {
 	assignments, err := g.client.Resource(dashboardAssignmentsGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -711,6 +736,9 @@ func (g *governanceDashboard) assignmentRows(ctx context.Context) ([]assignmentP
 			row.LogicalTenant = bundle.Spec.Governance.LogicalTenant
 			row.Team = bundle.Spec.Governance.Team
 			row.Permission = bundle.Spec.Governance.PermissionLevel
+		}
+		if !tenantAllowed(tenants, row.LogicalTenant) {
+			continue
 		}
 		rows = append(rows, row)
 	}
@@ -765,7 +793,7 @@ func (g *governanceDashboard) bundleRows(ctx context.Context) ([]bundlePageRow, 
 	return rows, nil
 }
 
-func (g *governanceDashboard) eventRows(ctx context.Context, deniedOnly bool) ([]eventPageRow, error) {
+func (g *governanceDashboard) eventRows(ctx context.Context, deniedOnly bool, tenants map[string]struct{}) ([]eventPageRow, error) {
 	list, err := g.client.Resource(dashboardEventsGVR).Namespace(g.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -777,6 +805,9 @@ func (g *governanceDashboard) eventRows(ctx context.Context, deniedOnly bool) ([
 			return nil, err
 		}
 		if deniedOnly && (event.Spec.Allowed || event.Spec.DecisionSource != assignmentv1alpha1.DecisionSourceDeny) {
+			continue
+		}
+		if !tenantAllowed(tenants, event.Spec.LogicalTenant) {
 			continue
 		}
 		events = append(events, event)

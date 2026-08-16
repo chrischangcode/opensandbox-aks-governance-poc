@@ -10,6 +10,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -143,7 +144,9 @@ func (r *Runner) governanceCRDs(ctx context.Context) Check {
 		"sandboxaccessrequests.aks-sandbox.azure.com",
 		"sandboxassignments.aks-sandbox.azure.com",
 		"sandboxcredentialevents.aks-sandbox.azure.com",
+		"sandboxcredentialrevocations.aks-sandbox.azure.com",
 		"sandboxegressevents.aks-sandbox.azure.com",
+		"sandboxprincipalbindings.aks-sandbox.azure.com",
 		"sandboxtemplates.aks-sandbox.azure.com",
 		"sandboxtenantpolicies.aks-sandbox.azure.com",
 		"sandboxvalidationruns.aks-sandbox.azure.com",
@@ -165,12 +168,48 @@ func (r *Runner) assignmentService(ctx context.Context) Check {
 	if err != nil {
 		return fail("assignmentd", "assignmentd Deployment is unavailable", "Deploy the governance assignment service.")
 	}
-	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 ||
-		deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
-		return fail("assignmentd", "assignmentd must run as a singleton with Recreate rollout strategy", "Keep one assignmentd replica so tenant admission and assignment creation remain serialized.")
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas < 2 ||
+		deployment.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+		return fail("assignmentd", "assignmentd must run with at least two replicas and RollingUpdate", "Deploy multiple replicas; Kubernetes Leases serialize tenant admission and elect one assignment controller.")
 	}
-	if deployment.Status.ReadyReplicas != 1 {
-		return fail("assignmentd", "assignmentd does not have exactly one ready replica", "Inspect the Deployment rollout, image pull, Secret, and scheduling events.")
+	if deployment.Status.ReadyReplicas < 2 {
+		return fail("assignmentd", "assignmentd does not have at least two ready replicas", "Inspect the Deployment rollout, image pull, Secret, and scheduling events.")
+	}
+	pdb, err := r.kube.PolicyV1().PodDisruptionBudgets(r.config.AssignmentNamespace).Get(ctx, "assignmentd", metav1.GetOptions{})
+	if err != nil || pdb.Spec.MinAvailable == nil || pdb.Spec.MinAvailable.IntValue() < 1 {
+		return fail("assignmentd", "assignmentd PodDisruptionBudget is missing or ineffective", "Apply a PodDisruptionBudget with minAvailable of at least one.")
+	}
+	role, err := r.kube.RbacV1().Roles(r.config.AssignmentNamespace).Get(ctx, "assignmentd", metav1.GetOptions{})
+	if err != nil || !roleAllows(role.Rules, "coordination.k8s.io", "leases", "create", "get", "update", "patch", "delete") {
+		return fail("assignmentd", "assignmentd cannot manage admission and leader-election Leases", "Grant the assignmentd Role create, get, update, patch, and delete on coordination.k8s.io Leases.")
+	}
+	binding, err := r.kube.RbacV1().RoleBindings(r.config.AssignmentNamespace).Get(ctx, "assignmentd", metav1.GetOptions{})
+	if err != nil || binding.RoleRef.Kind != "Role" || binding.RoleRef.Name != "assignmentd" ||
+		!hasServiceAccountSubject(binding.Subjects, r.config.AssignmentNamespace, "assignmentd") {
+		return fail("assignmentd", "assignmentd Lease permissions are not bound to its ServiceAccount", "Bind the assignmentd Role to the assignmentd ServiceAccount.")
+	}
+	tokenReviewRole, err := r.kube.RbacV1().ClusterRoles().Get(ctx, "assignmentd-tokenreview", metav1.GetOptions{})
+	if err != nil || !roleAllows(tokenReviewRole.Rules, "authentication.k8s.io", "tokenreviews", "create") {
+		return fail("assignmentd", "assignmentd cannot authenticate caller or Pod tokens", "Grant create on authentication.k8s.io TokenReviews.")
+	}
+	tokenReviewBinding, err := r.kube.RbacV1().ClusterRoleBindings().Get(ctx, "assignmentd-tokenreview", metav1.GetOptions{})
+	if err != nil || tokenReviewBinding.RoleRef.Kind != "ClusterRole" ||
+		tokenReviewBinding.RoleRef.Name != "assignmentd-tokenreview" ||
+		!hasServiceAccountSubject(tokenReviewBinding.Subjects, r.config.AssignmentNamespace, "assignmentd") {
+		return fail("assignmentd", "TokenReview permission is not bound to assignmentd", "Bind assignmentd-tokenreview to the assignmentd ServiceAccount.")
+	}
+	workloadRole, err := r.kube.RbacV1().Roles(r.config.WorkloadNamespace).Get(ctx, "assignmentd-workloads", metav1.GetOptions{})
+	if err != nil ||
+		!roleAllows(workloadRole.Rules, "sandbox.opensandbox.io", "batchsandboxes", "get", "list", "watch", "delete") ||
+		!roleAllows(workloadRole.Rules, "", "pods", "get", "list", "watch") ||
+		!roleAllows(workloadRole.Rules, "", "serviceaccounts", "get", "list", "watch") {
+		return fail("assignmentd", "assignmentd cannot reconcile workload identities", "Grant the assignmentd-workloads Role access to BatchSandboxes, Pods, and ServiceAccounts.")
+	}
+	workloadBinding, err := r.kube.RbacV1().RoleBindings(r.config.WorkloadNamespace).Get(ctx, "assignmentd-workloads", metav1.GetOptions{})
+	if err != nil || workloadBinding.RoleRef.Kind != "Role" ||
+		workloadBinding.RoleRef.Name != "assignmentd-workloads" ||
+		!hasServiceAccountSubject(workloadBinding.Subjects, r.config.AssignmentNamespace, "assignmentd") {
+		return fail("assignmentd", "workload reconciliation permission is not bound to assignmentd", "Bind assignmentd-workloads to the assignmentd ServiceAccount.")
 	}
 	mode := deploymentEnv(deployment, "ASSIGNMENTD_EGRESS_IDENTITY_MODE")
 	if mode != "projected-sidecar" && mode != "external-mediator" {
@@ -179,7 +218,40 @@ func (r *Runner) assignmentService(ctx context.Context) Check {
 	if _, err := r.kube.CoreV1().Services(r.config.AssignmentNamespace).Get(ctx, "assignmentd", metav1.GetOptions{}); err != nil {
 		return fail("assignmentd", "assignmentd Service is unavailable", "Apply the assignmentd Service manifest.")
 	}
-	return pass("assignmentd", fmt.Sprintf("assignmentd is ready in %s identity mode", mode))
+	return pass("assignmentd", fmt.Sprintf("%d assignmentd replicas are ready in %s identity mode", deployment.Status.ReadyReplicas, mode))
+}
+
+func roleAllows(rules []rbacv1.PolicyRule, apiGroup, resource string, verbs ...string) bool {
+	for _, rule := range rules {
+		if !contains(rule.APIGroups, apiGroup) || !contains(rule.Resources, resource) {
+			continue
+		}
+		for _, verb := range verbs {
+			if !contains(rule.Verbs, verb) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func hasServiceAccountSubject(subjects []rbacv1.Subject, namespace, name string) bool {
+	for _, subject := range subjects {
+		if subject.Kind == "ServiceAccount" && subject.Namespace == namespace && subject.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted || value == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) openSandboxService(ctx context.Context) Check {
@@ -248,10 +320,27 @@ func (r *Runner) networkPolicy(ctx context.Context) Check {
 		return warning("network-policy", "No workload namespace NetworkPolicy is installed", "Install fail-closed ingress and mediated-egress policies.")
 	}
 	names := make([]string, 0, len(policies.Items))
+	required := map[string]bool{
+		"sandbox-default-deny-egress": false,
+		"sandbox-allow-assignmentd":   false,
+	}
 	for i := range policies.Items {
 		names = append(names, policies.Items[i].Name)
+		if _, ok := required[policies.Items[i].Name]; ok {
+			required[policies.Items[i].Name] = true
+		}
 	}
 	sort.Strings(names)
+	var missing []string
+	for name, found := range required {
+		if !found {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) != 0 {
+		sort.Strings(missing)
+		return warning("network-policy", "Forced-egress policies are missing: "+strings.Join(missing, ", "), "Apply deploy/governance/k8s/forced-egress-networkpolicy.yaml.")
+	}
 	return pass("network-policy", "NetworkPolicies installed: "+strings.Join(names, ", "))
 }
 

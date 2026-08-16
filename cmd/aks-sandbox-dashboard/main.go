@@ -53,8 +53,10 @@ func run(args []string, logger *slog.Logger) error {
 	}
 	if cfg.lifecycleEndpoint != "" {
 		clientOptions.LifecycleHTTPClient = &http.Client{
-			Transport: &capabilityProfileTransport{base: http.DefaultTransport, profile: cfg.capabilityProfile},
-			Timeout:   11 * time.Minute,
+			Transport: &sandboxTemplateTransport{
+				base: http.DefaultTransport, template: cfg.sandboxTemplate, tokenFile: cfg.lifecycleTokenFile,
+			},
+			Timeout: 11 * time.Minute,
 		}
 	}
 	var client osbclient.Client

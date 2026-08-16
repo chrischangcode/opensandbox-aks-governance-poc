@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -37,6 +38,7 @@ class Settings:
     broker_url: str
     opensandbox_domain: str
     opensandbox_api_key: str
+    assignmentd_token_file: str
 
 
 def settings() -> Settings:
@@ -53,7 +55,15 @@ def settings() -> Settings:
             "OPEN_SANDBOX_DOMAIN", "127.0.0.1:18080"
         ),
         opensandbox_api_key=os.environ["OPEN_SANDBOX_API_KEY"],
+        assignmentd_token_file=os.environ["ASSIGNMENTD_TOKEN_FILE"],
     )
+
+
+def assignmentd_headers() -> dict[str, str]:
+    token = open(settings().assignmentd_token_file, encoding="utf-8").read().strip()
+    if not token:
+        raise RuntimeError("assignmentd caller token is unavailable")
+    return {"Authorization": "Bearer " + token}
 
 
 def custom_objects() -> client.CustomObjectsApi:
@@ -266,25 +276,28 @@ def create_bound_identity_token(
 
 async def create_sandbox(template: dict[str, Any]) -> str:
     cfg = settings()
-    spec = template["spec"]
     body = {
-        "image": {"uri": spec["image"]},
-        "entrypoint": spec["entrypoint"],
-        "timeout": spec["timeoutSeconds"],
-        "resourceLimits": spec["resources"],
         "metadata": {
-            "aks-sandbox.azure.com/template": template["metadata"]["name"],
             "aks-sandbox.azure.com/harness": "opencode-mcp",
         },
         "extensions": {
-            "aks-sandbox.azure.com/capabilityProfile": spec[
-                "capabilityBundleRef"
-            ]["name"]
+            "aks-sandbox.azure.com/template": template["metadata"]["name"]
         },
     }
     async with httpx.AsyncClient(timeout=300) as http:
-        response = await http.post(f"{cfg.assignmentd_url}/sandboxes", json=body)
-        response.raise_for_status()
+        response = await http.post(
+            f"{cfg.assignmentd_url}/sandboxes",
+            json=body,
+            headers={
+                **assignmentd_headers(),
+                "Idempotency-Key": str(uuid.uuid4()),
+            },
+        )
+        if response.is_error:
+            raise RuntimeError(
+                f"assignmentd create failed with HTTP {response.status_code}: "
+                f"{response.text[:1000]}"
+            )
         return response.json()["id"]
 
 
@@ -292,7 +305,8 @@ async def delete_sandbox(sandbox_id: str) -> None:
     cfg = settings()
     async with httpx.AsyncClient(timeout=120) as http:
         response = await http.delete(
-            f"{cfg.assignmentd_url}/sandboxes/{sandbox_id}"
+            f"{cfg.assignmentd_url}/sandboxes/{sandbox_id}",
+            headers=assignmentd_headers(),
         )
         if response.status_code not in (200, 202, 204, 404):
             response.raise_for_status()
@@ -760,7 +774,6 @@ async def exercise_brokered_credential(
                 f"{cfg.broker_url}/v1/credentials",
                 json={
                     "identityToken": identity_token,
-                    "sourceAddress": source_address,
                     "backend": backend,
                     "method": method,
                     "host": host,
@@ -862,7 +875,6 @@ async def snapshot_pause_resume(
                 f"{cfg.broker_url}/v1/credentials",
                 json={
                     "identityToken": identity_token,
-                    "sourceAddress": source_address,
                     "backend": backend,
                     "method": method,
                     "host": host,
@@ -876,12 +888,14 @@ async def snapshot_pause_resume(
             await sandbox.close()
             sandbox = None
             paused = await http.post(
-                f"{cfg.assignmentd_url}/sandboxes/{sandbox_id}/pause"
+                f"{cfg.assignmentd_url}/sandboxes/{sandbox_id}/pause",
+                headers=assignmentd_headers(),
             )
             paused.raise_for_status()
             await wait_for_paused(sandbox_id, old_pod_name)
             resumed = await http.post(
-                f"{cfg.assignmentd_url}/sandboxes/{sandbox_id}/resume"
+                f"{cfg.assignmentd_url}/sandboxes/{sandbox_id}/resume",
+                headers=assignmentd_headers(),
             )
             resumed.raise_for_status()
             resumed_assignment = await wait_for_resumed(

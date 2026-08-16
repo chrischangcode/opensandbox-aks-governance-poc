@@ -50,11 +50,13 @@ admin_bundle_name="demo-web-reader-$run_suffix"
 admin_template_name="demo-python-web-reader-$run_suffix"
 admin_bundle_created=false
 admin_template_created=false
+assignmentd_token_file="$output_dir/assignmentd-token"
 
 delete_sandbox_and_wait() {
   local id="$1"
   local pod="$2"
   if ! curl -fsS -X DELETE \
+    -H "Authorization: Bearer $(<"$assignmentd_token_file")" \
     "http://127.0.0.1:${assignment_port}/opensandbox/sandboxes/${id}" \
     >/dev/null 2>&1; then
     kubectl -n "$assignment_namespace" delete sandboxassignments \
@@ -195,20 +197,17 @@ create_from_template() {
   fi
   body="$(
     jq '{
-      image: {uri: .spec.image},
-      entrypoint: .spec.entrypoint,
-      timeout: .spec.timeoutSeconds,
-      resourceLimits: .spec.resources,
       metadata: {
-        "aks-sandbox.azure.com/demo": "live-replay",
-        "aks-sandbox.azure.com/template": .metadata.name
+        "aks-sandbox.azure.com/demo": "live-replay"
       },
       extensions: {
-        "aks-sandbox.azure.com/capabilityProfile": .spec.capabilityBundleRef.name
+        "aks-sandbox.azure.com/template": .metadata.name
       }
     }' <<<"$template"
   )"
   curl -fsS \
+    -H "Authorization: Bearer $(<"$assignmentd_token_file")" \
+    -H "Idempotency-Key: ${run_suffix}-${template_name}" \
     -H 'Content-Type: application/json' \
     --data "$body" \
     "http://127.0.0.1:${assignment_port}/opensandbox/sandboxes" |
@@ -289,7 +288,12 @@ kubectl apply -f deploy/governance/k8s/crds.yaml
 kubectl apply -f deploy/governance/k8s/capability-bundles.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-templates.yaml
 kubectl apply -f deploy/governance/k8s/tenant-policies.yaml
+kubectl apply -f deploy/governance/k8s/harness-serviceaccount.yaml
+kubectl apply -f deploy/governance/k8s/principal-bindings.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-serviceaccount.yaml
+kubectl -n "$assignment_namespace" create token assignmentd-harness \
+  --audience aks-sandbox-lifecycle --duration 1h >"$assignmentd_token_file"
+chmod 600 "$assignmentd_token_file"
 kubectl rollout status deployment/assignmentd \
   -n "$assignment_namespace" --timeout=180s
 
@@ -312,7 +316,8 @@ start_background requester-dashboard \
   --kubeconfig "$KUBECONFIG" \
   --opensandbox-namespace "$workload_namespace" \
   --lifecycle-endpoint "http://127.0.0.1:${assignment_port}/opensandbox" \
-  --capability-profile team-a-reader \
+  --lifecycle-token-file "$assignmentd_token_file" \
+  --sandbox-template python-kata-reader-v2 \
   --cookie-secure=false
 
 start_background admin-dashboard \
@@ -326,7 +331,8 @@ start_background admin-dashboard \
   --kubeconfig "$KUBECONFIG" \
   --opensandbox-namespace "$workload_namespace" \
   --lifecycle-endpoint "http://127.0.0.1:${assignment_port}/opensandbox" \
-  --capability-profile team-a-reader \
+  --lifecycle-token-file "$assignmentd_token_file" \
+  --sandbox-template python-kata-reader-v2 \
   --cookie-secure=false
 
 wait_for_http "http://127.0.0.1:${requester_port}/dashboard/" requester-dashboard

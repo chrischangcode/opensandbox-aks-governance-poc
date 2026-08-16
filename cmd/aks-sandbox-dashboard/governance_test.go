@@ -99,6 +99,43 @@ func TestGovernanceCreatesRequestFromDeniedEventAndAuthenticatedIdentity(t *test
 	}
 }
 
+func TestGovernanceScopesRequesterAndAdministratorByLogicalTenant(t *testing.T) {
+	fixtures := governanceFixtureObjects(t)
+	tenantBEvent := fixtures[2].(*assignmentv1alpha1.SandboxEgressEvent).DeepCopy()
+	tenantBEvent.Name = "denied-b"
+	tenantBEvent.Spec.LogicalTenant = "tenant-b"
+	fixtures = append(fixtures, tenantBEvent)
+
+	_, handler := newGovernanceTestHandler(t, fixtures...)
+	requester := authenticatedIdentity{TenantID: testTenantID, ObjectID: testUserID, Name: "Requester"}
+	response := serveGovernance(handler, http.MethodGet, "/access", nil, requester, "csrf")
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "denied-b") {
+		t.Fatalf("tenant-scoped access response = %d body=%s", response.Code, response.Body.String())
+	}
+
+	form := url.Values{
+		"csrf": {"csrf"}, "eventName": {"denied-b"},
+		"reason": {"Need temporary repository access."}, "durationMinutes": {"30"},
+	}
+	response = serveGovernance(handler, http.MethodPost, "/access/requests", form, requester, "csrf")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-tenant request response = %d body=%s", response.Code, response.Body.String())
+	}
+
+	request := pendingDashboardAccessRequest("tenant-b-request")
+	request.Spec.Requester.LogicalTenant = "tenant-b"
+	_, handler = newGovernanceTestHandler(t, append(governanceFixtureObjects(t), request)...)
+	admin := authenticatedIdentity{TenantID: testTenantID, ObjectID: testAdminID, Name: "Administrator", Roles: []string{"OpenSandbox.Admin"}}
+	response = serveGovernance(
+		handler, http.MethodPost, "/admin/requests/tenant-b-request/approve",
+		url.Values{"csrf": {"csrf"}, "decisionReason": {"Approved for one repository refresh."}, "durationMinutes": {"30"}},
+		admin, "csrf",
+	)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-tenant approval response = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestGovernanceApproveAndDenyUseAuthenticatedAdmin(t *testing.T) {
 	t.Run("approve", func(t *testing.T) {
 		request := pendingDashboardAccessRequest("access-a")
@@ -260,6 +297,10 @@ func newGovernanceTestHandler(t *testing.T, objects ...runtime.Object) (*governa
 	if err := assignmentv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	objects = append(objects,
+		testPrincipalBinding("requester-binding", testUserID, []string{"tenant-a"}, nil),
+		testPrincipalBinding("admin-binding", testAdminID, []string{"tenant-a"}, []string{"tenant-a"}),
+	)
 	client := fake.NewSimpleDynamicClient(scheme, objects...)
 	cfg := config{
 		basePath: "/dashboard", assignmentNamespace: "aks-sandbox-system",
@@ -366,10 +407,21 @@ func pendingDashboardAccessRequest(name string) *assignmentv1alpha1.SandboxAcces
 			Reason:                   "Need temporary repository access.",
 			RequestedDurationSeconds: 3600,
 			Requester: assignmentv1alpha1.GovernanceIdentity{
-				TenantID: testTenantID, ObjectID: testUserID, DisplayName: "Requester",
+				TenantID: testTenantID, ObjectID: testUserID, DisplayName: "Requester", LogicalTenant: "tenant-a",
 			},
 		},
 		Status: assignmentv1alpha1.SandboxAccessRequestStatus{State: assignmentv1alpha1.SandboxAccessRequestPending},
+	}
+}
+
+func testPrincipalBinding(name, objectID string, requesterTenants, adminTenants []string) *assignmentv1alpha1.SandboxPrincipalBinding {
+	return &assignmentv1alpha1.SandboxPrincipalBinding{
+		TypeMeta:   metav1.TypeMeta{APIVersion: assignmentv1alpha1.GroupVersion.String(), Kind: "SandboxPrincipalBinding"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "aks-sandbox-system"},
+		Spec: assignmentv1alpha1.SandboxPrincipalBindingSpec{
+			TenantID: testTenantID, ObjectID: objectID,
+			RequesterTenants: requesterTenants, AdminTenants: adminTenants,
+		},
 	}
 }
 

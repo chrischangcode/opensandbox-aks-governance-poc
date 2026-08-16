@@ -300,6 +300,85 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  name: sandboxprincipalbindings.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: sandboxprincipalbindings
+    singular: sandboxprincipalbinding
+    kind: SandboxPrincipalBinding
+    shortNames: [sbprincipal]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              properties:
+                tenantId: { type: string, format: uuid }
+                objectId: { type: string, format: uuid }
+                serviceAccountNamespace:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                serviceAccountName:
+                  type: string
+                  minLength: 1
+                  maxLength: 253
+                  pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                requesterTenants:
+                  type: array
+                  maxItems: 128
+                  x-kubernetes-list-type: set
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 63
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                adminTenants:
+                  type: array
+                  maxItems: 128
+                  x-kubernetes-list-type: set
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 63
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: SandboxPrincipalBinding.spec is immutable
+                - rule: 'has(self.tenantId) == has(self.objectId)'
+                  message: tenantId and objectId must be specified together
+                - rule: 'has(self.serviceAccountNamespace) == has(self.serviceAccountName)'
+                  message: serviceAccountNamespace and serviceAccountName must be specified together
+                - rule: 'has(self.tenantId) != has(self.serviceAccountNamespace)'
+                  message: exactly one Entra principal or Kubernetes ServiceAccount is required
+                - rule: '(has(self.requesterTenants) ? size(self.requesterTenants) : 0) + (has(self.adminTenants) ? size(self.adminTenants) : 0) > 0'
+                  message: at least one requester or administrator tenant is required
+      additionalPrinterColumns:
+        - name: Tenant ID
+          type: string
+          jsonPath: .spec.tenantId
+        - name: Object ID
+          type: string
+          jsonPath: .spec.objectId
+        - name: ServiceAccount
+          type: string
+          jsonPath: .spec.serviceAccountName
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
   name: sandboxassignments.aks-sandbox.azure.com
 spec:
   group: aks-sandbox.azure.com
@@ -322,8 +401,20 @@ spec:
           properties:
             spec:
               type: object
-              required: [capabilityBundleRef]
+              required: [templateRef, logicalTenant, capabilityBundleRef]
               properties:
+                templateRef:
+                  type: object
+                  required: [name, uid, specRevision]
+                  properties:
+                    name: { type: string, minLength: 1, maxLength: 253 }
+                    uid: { type: string, minLength: 1, maxLength: 128 }
+                    specRevision: { type: string, pattern: '^sha256:[a-f0-9]{64}$' }
+                logicalTenant:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
                 capabilityBundleRef:
                   type: object
                   required: [name]
@@ -773,6 +864,55 @@ spec:
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxcredentialrevocations.aks-sandbox.azure.com
+spec:
+  group: aks-sandbox.azure.com
+  scope: Namespaced
+  names:
+    plural: sandboxcredentialrevocations
+    singular: sandboxcredentialrevocation
+    kind: SandboxCredentialRevocation
+    shortNames: [sbrevocation]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [grantId, expiresAt, assignmentRef, podUid, sandboxId]
+              properties:
+                grantId: { type: string, format: uuid }
+                expiresAt: { type: string, format: date-time }
+                assignmentRef:
+                  type: object
+                  required: [name, uid]
+                  properties:
+                    name: { type: string }
+                    uid: { type: string }
+                podUid: { type: string }
+                sandboxId: { type: string, minLength: 1, maxLength: 253 }
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: SandboxCredentialRevocation.spec is immutable
+      additionalPrinterColumns:
+        - name: Grant
+          type: string
+          jsonPath: .spec.grantId
+        - name: Sandbox
+          type: string
+          jsonPath: .spec.sandboxId
+        - name: Expires
+          type: date
+          jsonPath: .spec.expiresAt
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition

@@ -37,6 +37,9 @@ type CheckInput struct {
 	Path          string
 	Headers       map[string]string
 	SourceAddress string
+	// DeriveSourceFromIdentity is reserved for trusted in-process mediators that
+	// authenticate a Pod token but do not receive the sandbox network connection.
+	DeriveSourceFromIdentity bool
 }
 
 // Decision is an assignment authorization result.

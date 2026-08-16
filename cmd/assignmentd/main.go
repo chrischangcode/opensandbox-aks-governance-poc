@@ -20,6 +20,7 @@ import (
 
 	assignmentadmission "github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/admission"
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/authz"
+	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/callerauth"
 	assignmentcontroller "github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/controller"
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/credentialbroker"
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/opensandboxapi"
@@ -47,6 +48,7 @@ const (
 	maxCheckRequestBytes       = 1 << 20
 	leaderElectionName         = "assignmentd-controller"
 	capabilityGatewayAudience  = "aks-sandbox-capability-gateway"
+	lifecycleCallerAudience    = "aks-sandbox-lifecycle"
 	defaultAuditRetention      = 24 * time.Hour
 	defaultAuditQueueSize      = 1024
 )
@@ -152,22 +154,38 @@ func run(logger *slog.Logger, opts options) error {
 	grpcHealth.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
 	healthv1.RegisterHealthServer(grpcServer, grpcHealth)
 
+	callerAuthenticator, err := callerauth.New(coreClient, dynamicClient, assignmentNamespace, lifecycleCallerAudience)
+	if err != nil {
+		return err
+	}
 	lifecycleHandler := opensandboxapi.NewHandler(assignmentStore, opensandboxapi.Config{
-		Prefix:    "/opensandbox",
-		Upstream:  openSandboxURL,
-		APIKey:    os.Getenv("ASSIGNMENTD_OPENSANDBOX_API_KEY"),
-		Namespace: assignmentNamespace,
-		Admission: assignmentadmission.NewKubernetesAdmission(dynamicClient, assignmentNamespace, workloadNamespace),
+		Prefix:             "/opensandbox",
+		Upstream:           openSandboxURL,
+		APIKey:             os.Getenv("ASSIGNMENTD_OPENSANDBOX_API_KEY"),
+		Namespace:          assignmentNamespace,
+		Admission:          assignmentadmission.NewKubernetesAdmission(dynamicClient, coreClient, assignmentNamespace, workloadNamespace),
+		Templates:          opensandboxapi.NewKubernetesTemplateResolver(dynamicClient, assignmentNamespace),
+		CallerAuthorizer:   callerAuthenticator,
+		RequireIdempotency: true,
 	}, logger)
+	authenticatedLifecycleHandler := callerAuthenticator.Middleware(lifecycleHandler)
 	apiMux := http.NewServeMux()
-	apiMux.Handle("/opensandbox", lifecycleHandler)
-	apiMux.Handle("/opensandbox/", lifecycleHandler)
+	apiMux.Handle("/opensandbox", authenticatedLifecycleHandler)
+	apiMux.Handle("/opensandbox/", authenticatedLifecycleHandler)
 	if signingKey := os.Getenv("ASSIGNMENTD_BROKER_SIGNING_KEY"); signingKey != "" {
+		previousSigningKeys := map[string][]byte{}
+		if previousKey := os.Getenv("ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY"); previousKey != "" {
+			previousSigningKeys[envOr("ASSIGNMENTD_BROKER_PREVIOUS_SIGNING_KEY_ID", "previous")] = []byte(previousKey)
+		}
 		broker, err := credentialbroker.New(
 			checker,
 			credentialbroker.NewKubernetesGrantValidator(dynamicClient, coreClient, assignmentNamespace, workloadNamespace),
 			credentialbroker.NewKubernetesAuditSink(dynamicClient, assignmentNamespace),
-			credentialbroker.Config{SigningKey: []byte(signingKey)},
+			credentialbroker.NewKubernetesRevocationStore(dynamicClient, assignmentNamespace),
+			credentialbroker.Config{
+				SigningKey: []byte(signingKey), SigningKeyID: envOr("ASSIGNMENTD_BROKER_SIGNING_KEY_ID", "current"),
+				PreviousSigningKeys: previousSigningKeys,
+			},
 			logger,
 		)
 		if err != nil {

@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/chrischangcode/opensandbox-aks-governance-poc/internal/assignment/authz"
@@ -31,9 +30,11 @@ const (
 )
 
 type Config struct {
-	SigningKey []byte
-	Issuer     string
-	Audience   string
+	SigningKey          []byte
+	SigningKeyID        string
+	PreviousSigningKeys map[string][]byte
+	Issuer              string
+	Audience            string
 }
 
 type GrantClaims struct {
@@ -65,20 +66,23 @@ type AuditSink interface {
 	Record(context.Context, AuditEvent) error
 }
 
+type RevocationStore interface {
+	Revoke(context.Context, GrantClaims) error
+	IsRevoked(context.Context, string) (bool, error)
+}
+
 type Broker struct {
-	checker   authz.Checker
-	validator GrantValidator
-	audit     AuditSink
-	config    Config
-	logger    *slog.Logger
-	now       func() time.Time
-	mu        sync.Mutex
-	revoked   map[string]time.Time
+	checker     authz.Checker
+	validator   GrantValidator
+	audit       AuditSink
+	revocations RevocationStore
+	config      Config
+	logger      *slog.Logger
+	now         func() time.Time
 }
 
 type issueRequest struct {
 	IdentityToken string `json:"identityToken"`
-	SourceAddress string `json:"sourceAddress"`
 	Backend       string `json:"backend"`
 	Method        string `json:"method"`
 	Host          string `json:"host"`
@@ -87,9 +91,9 @@ type issueRequest struct {
 	TTLSeconds    int64  `json:"ttlSeconds"`
 }
 
-func New(checker authz.Checker, validator GrantValidator, audit AuditSink, config Config, logger *slog.Logger) (*Broker, error) {
-	if checker == nil || validator == nil {
-		return nil, errors.New("credential broker checker and validator are required")
+func New(checker authz.Checker, validator GrantValidator, audit AuditSink, revocations RevocationStore, config Config, logger *slog.Logger) (*Broker, error) {
+	if checker == nil || validator == nil || revocations == nil {
+		return nil, errors.New("credential broker checker, validator, and revocation store are required")
 	}
 	if len(config.SigningKey) < 32 {
 		return nil, errors.New("credential broker signing key must be at least 32 bytes")
@@ -100,12 +104,20 @@ func New(checker authz.Checker, validator GrantValidator, audit AuditSink, confi
 	if config.Audience == "" {
 		config.Audience = defaultAudience
 	}
+	if config.SigningKeyID == "" {
+		config.SigningKeyID = "current"
+	}
+	for keyID, key := range config.PreviousSigningKeys {
+		if strings.TrimSpace(keyID) == "" || len(key) < 32 || keyID == config.SigningKeyID {
+			return nil, errors.New("credential broker previous signing keys are invalid")
+		}
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Broker{
-		checker: checker, validator: validator, audit: audit, config: config,
-		logger: logger, now: time.Now, revoked: map[string]time.Time{},
+		checker: checker, validator: validator, audit: audit, revocations: revocations, config: config,
+		logger: logger, now: time.Now,
 	}, nil
 }
 
@@ -128,8 +140,8 @@ func (b *Broker) issue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if request.IdentityToken == "" || request.SourceAddress == "" {
-		writeError(w, http.StatusBadRequest, "Pod-bound identity and source address are required")
+	if request.IdentityToken == "" {
+		writeError(w, http.StatusBadRequest, "Pod-bound identity is required")
 		return
 	}
 	if !validTaskID(request.TaskID) {
@@ -149,7 +161,7 @@ func (b *Broker) issue(w http.ResponseWriter, r *http.Request) {
 	decision, err := b.checker.Check(r.Context(), authz.CheckInput{
 		Backend: target.Backend, IdentityToken: request.IdentityToken,
 		Method: target.Method, Host: target.Host, Path: target.Path,
-		Headers: map[string]string{}, SourceAddress: request.SourceAddress,
+		Headers: map[string]string{}, DeriveSourceFromIdentity: true,
 	})
 	if err != nil {
 		b.logger.ErrorContext(r.Context(), "credential authorization failed", "error", err)
@@ -177,7 +189,9 @@ func (b *Broker) issue(w http.ResponseWriter, r *http.Request) {
 			NotBefore: jwt.NewNumericDate(now), ID: grantID,
 		},
 	}
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(b.config.SigningKey)
+	grantToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	grantToken.Header["kid"] = b.config.SigningKeyID
+	token, err := grantToken.SignedString(b.config.SigningKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "credential issuance failed")
 		return
@@ -204,7 +218,12 @@ func (b *Broker) verify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "credential is invalid or expired")
 		return
 	}
-	if b.isRevoked(claims.ID) {
+	revoked, err := b.revocations.IsRevoked(r.Context(), claims.ID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "credential revocation state is unavailable")
+		return
+	}
+	if revoked {
 		writeError(w, http.StatusUnauthorized, "credential is revoked")
 		return
 	}
@@ -234,15 +253,10 @@ func (b *Broker) revoke(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "credential is invalid or expired")
 		return
 	}
-	b.mu.Lock()
-	now := b.now()
-	for id, expiry := range b.revoked {
-		if !expiry.After(now) {
-			delete(b.revoked, id)
-		}
+	if err := b.revocations.Revoke(r.Context(), claims); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "credential revocation state is unavailable")
+		return
 	}
-	b.revoked[claims.ID] = claims.ExpiresAt.Time
-	b.mu.Unlock()
 	if err := b.record(r.Context(), "revoked", claims); err != nil {
 		b.logger.ErrorContext(r.Context(), "record credential revocation", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "credential audit is unavailable")
@@ -262,7 +276,17 @@ func (b *Broker) parseAuthorization(r *http.Request) (GrantClaims, error) {
 		if token.Method != jwt.SigningMethodHS256 {
 			return nil, errors.New("unexpected signing method")
 		}
-		return b.config.SigningKey, nil
+		keyID, _ := token.Header["kid"].(string)
+		switch keyID {
+		case b.config.SigningKeyID:
+			return b.config.SigningKey, nil
+		default:
+			key, ok := b.config.PreviousSigningKeys[keyID]
+			if !ok {
+				return nil, errors.New("unknown signing key")
+			}
+			return key, nil
+		}
 	}, jwt.WithAudience(b.config.Audience), jwt.WithIssuer(b.config.Issuer),
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithTimeFunc(b.now))
 	if err != nil || !token.Valid || claims.ID == "" || claims.AssignmentUID == "" ||
@@ -276,17 +300,6 @@ func (b *Broker) parseAuthorization(r *http.Request) (GrantClaims, error) {
 		return GrantClaims{}, errors.New("invalid scope")
 	}
 	return claims, nil
-}
-
-func (b *Broker) isRevoked(id string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	expiry, revoked := b.revoked[id]
-	if revoked && !expiry.After(b.now()) {
-		delete(b.revoked, id)
-		return false
-	}
-	return revoked
 }
 
 func (b *Broker) record(ctx context.Context, action string, claims GrantClaims) error {

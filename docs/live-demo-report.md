@@ -3,6 +3,9 @@
 > Admin-approved templates, Kata isolation, sandbox-only agent execution,
 > per-sandbox egress attribution, and exact temporary access grants.
 
+See [P0 managed-service boundary findings](p0-service-boundary-findings.md) for
+the security, durability, tenancy, egress, and operability assessment.
+
 Date: 2026-08-15
 
 This demonstration used a disposable AKS cluster with an isolated Kata node,
@@ -706,8 +709,9 @@ git diff check: passed
   differs.
 - `SandboxTenantPolicy` admission fails closed and enforces logical-tenant
   bundle, concurrency, lifetime, CPU, memory, and access-duration budgets.
-- The assignment API is deployed as one replica with `Recreate` strategy so
-  budget admission and assignment reservation remain serialized.
+- The assignment API is deployed as two replicas with `RollingUpdate`, a
+  PodDisruptionBudget, controller leader election, and per-tenant Leases that
+  serialize budget admission across replicas.
 - Changed paths select only exact admin-approved validation commands. Durable
   `SandboxValidationRun` evidence stores stdout/stderr hashes rather than
   unrestricted logs.

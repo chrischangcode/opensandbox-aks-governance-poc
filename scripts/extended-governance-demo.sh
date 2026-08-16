@@ -57,6 +57,8 @@ kubectl apply -f deploy/governance/k8s/crds.yaml
 kubectl apply -f deploy/governance/k8s/capability-bundles.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-templates.yaml
 kubectl apply -f deploy/governance/k8s/tenant-policies.yaml
+kubectl apply -f deploy/governance/k8s/harness-serviceaccount.yaml
+kubectl apply -f deploy/governance/k8s/principal-bindings.yaml
 kubectl apply -f deploy/governance/k8s/sandbox-serviceaccount.yaml
 
 echo "==> Ensuring the broker has a generated signing key"

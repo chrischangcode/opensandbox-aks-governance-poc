@@ -1,7 +1,11 @@
 // Package assignment defines storage-neutral sandbox assignment types.
 package assignment
 
-import "context"
+import (
+	"context"
+	"errors"
+	"time"
+)
 
 const (
 	// EligibleServiceAccountLabel marks a platform-owned ServiceAccount as safe
@@ -22,7 +26,13 @@ const (
 	PausedAnnotation = "aks-sandbox.azure.com/paused"
 	// ResumeAfterPodUIDAnnotation prevents readiness until resume creates a new Pod.
 	ResumeAfterPodUIDAnnotation = "aks-sandbox.azure.com/resume-after-pod-uid"
+	// IdempotencyKeyAnnotation records the caller operation key without request contents.
+	IdempotencyKeyAnnotation = "aks-sandbox.azure.com/idempotency-key"
+	// RequestHashAnnotation detects reuse of an idempotency key with different intent.
+	RequestHashAnnotation = "aks-sandbox.azure.com/request-hash"
 )
+
+var ErrIdempotencyConflict = errors.New("idempotency key was reused with a different request")
 
 // Assignment is the allocator-facing view of a SandboxAssignment.
 type Assignment struct {
@@ -30,7 +40,16 @@ type Assignment struct {
 	Name                 string
 	UID                  string
 	ResourceVersion      string
+	TemplateName         string
+	TemplateUID          string
+	TemplateRevision     string
+	LogicalTenant        string
 	CapabilityBundleName string
+	SandboxID            string
+	IdempotencyKey       string
+	RequestHash          string
+	CreatedAt            time.Time
+	Existing             bool
 	Deleting             bool
 	Ready                bool
 	WorkloadRef          *ObjectReference
@@ -60,7 +79,13 @@ type CreateRequest struct {
 	Namespace            string
 	Name                 string
 	GenerateName         string
+	TemplateName         string
+	TemplateUID          string
+	TemplateRevision     string
+	LogicalTenant        string
 	CapabilityBundleName string
+	IdempotencyKey       string
+	RequestHash          string
 }
 
 // Store persists assignments and verifies referenced capability bundles.

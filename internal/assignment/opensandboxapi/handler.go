@@ -4,7 +4,10 @@ package opensandboxapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,8 +25,14 @@ import (
 )
 
 const (
-	// CapabilityProfileExtension selects an installed CapabilityBundle by name.
+	// CapabilityProfileExtension reports the capability selected by the trusted
+	// template resolver. Caller-provided values are ignored.
 	CapabilityProfileExtension = "aks-sandbox.azure.com/capabilityProfile"
+	// SandboxTemplateExtension selects an administrator-owned immutable sandbox
+	// template. The lifecycle service, not the caller, resolves the workload shape.
+	SandboxTemplateExtension = "aks-sandbox.azure.com/template"
+	// SandboxTemplateRevisionExtension reports the resolved immutable template hash.
+	SandboxTemplateRevisionExtension = "aks-sandbox.azure.com/templateRevision"
 	// assignmentUIDExtension is injected by the facade and propagated by
 	// OpenSandbox to OpenSandboxAssignmentUIDAnnotation.
 	assignmentUIDExtension = "opensandbox.extensions.aks-sandbox-assignment-uid"
@@ -33,17 +42,26 @@ const (
 
 // Config configures the OpenSandbox facade.
 type Config struct {
-	Prefix            string
-	Upstream          *url.URL
-	APIKey            string
-	Namespace         string
-	TransitionTimeout time.Duration
-	Admission         Admission
+	Prefix              string
+	Upstream            *url.URL
+	APIKey              string
+	Namespace           string
+	TransitionTimeout   time.Duration
+	Admission           Admission
+	Templates           TemplateResolver
+	CallerAuthorizer    CallerAuthorizer
+	RequireIdempotency  bool
+	PendingOperationTTL time.Duration
 }
 
 // Admission enforces tenant budgets before an assignment or upstream sandbox is created.
 type Admission interface {
-	AuthorizeCreate(context.Context, string, *ossandbox.CreateSandboxRequest) error
+	AuthorizeCreate(context.Context, string, *ossandbox.CreateSandboxRequest) (func(), error)
+}
+
+// CallerAuthorizer enforces the authenticated caller's logical tenant scope.
+type CallerAuthorizer interface {
+	AuthorizeTenant(context.Context, string) error
 }
 
 // createSandboxResponse fills the SDK's missing asynchronous create response
@@ -93,8 +111,8 @@ type Handler struct {
 
 // NewHandler creates an OpenSandbox-compatible facade.
 func NewHandler(store assignment.Store, config Config, logger *slog.Logger) http.Handler {
-	if store == nil || config.Upstream == nil {
-		panic("opensandbox API: store and upstream are required")
+	if store == nil || config.Upstream == nil || config.Templates == nil {
+		panic("opensandbox API: store, upstream, and template resolver are required")
 	}
 	if config.Prefix == "" {
 		config.Prefix = defaultPrefix
@@ -105,6 +123,9 @@ func NewHandler(store assignment.Store, config Config, logger *slog.Logger) http
 	}
 	if config.TransitionTimeout <= 0 {
 		config.TransitionTimeout = 30 * time.Second
+	}
+	if config.PendingOperationTTL <= 0 {
+		config.PendingOperationTTL = 10 * time.Minute
 	}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
@@ -117,6 +138,7 @@ func NewHandler(store assignment.Store, config Config, logger *slog.Logger) http
 			proxyRequest.Out.URL.RawPath = ""
 			proxyRequest.Out.Host = config.Upstream.Host
 			proxyRequest.SetXForwarded()
+			proxyRequest.Out.Header.Del("Authorization")
 			setUpstreamAPIKey(proxyRequest.Out.Header, config.APIKey)
 		},
 		ModifyResponse: sanitizeProxiedResponse,
@@ -159,8 +181,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 			h.resume(w, request, id)
 			return
 		case request.Method == http.MethodPatch && action == "metadata":
-			h.patchMetadata(w, request)
+			h.patchMetadata(w, request, id)
 			return
+		}
+	}
+	if h.config.CallerAuthorizer != nil {
+		if path == "/sandboxes" {
+			writeError(w, http.StatusForbidden, "tenant-scoped sandbox listing is unavailable")
+			return
+		}
+		if matched {
+			if _, ok := h.authorizedAssignment(w, request, id); !ok {
+				return
+			}
 		}
 	}
 	h.proxy.ServeHTTP(w, request)
@@ -180,36 +213,133 @@ func (h *Handler) create(w http.ResponseWriter, request *http.Request) {
 	if value.Extensions == nil {
 		value.Extensions = map[string]string{}
 	}
-	profile := strings.TrimSpace(value.Extensions[CapabilityProfileExtension])
-	if profile == "" {
-		writeError(w, http.StatusForbidden, "capability profile is required")
+	templateName := strings.TrimSpace(value.Extensions[SandboxTemplateExtension])
+	if templateName == "" {
+		writeError(w, http.StatusForbidden, "sandbox template is required")
 		return
 	}
-	bundleName := profile
-	delete(value.Extensions, CapabilityProfileExtension)
-	delete(value.Extensions, assignmentUIDExtension)
+	resolved, err := h.config.Templates.Resolve(request.Context(), templateName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "sandbox template is unavailable")
+		} else {
+			h.logger.WarnContext(request.Context(), "sandbox template rejected", "template", templateName, "error", err)
+			writeError(w, http.StatusForbidden, "sandbox template is unavailable")
+		}
+		return
+	}
+	if h.config.CallerAuthorizer != nil {
+		if err := h.config.CallerAuthorizer.AuthorizeTenant(request.Context(), resolved.LogicalTenant); err != nil {
+			writeError(w, http.StatusForbidden, "caller is not authorized for the sandbox template")
+			return
+		}
+	}
+	bundleName := resolved.CapabilityBundleName
+	value.Image = &ossandbox.ImageSpec{URI: resolved.Image}
+	value.SnapshotID = ""
+	value.Timeout = &resolved.TimeoutSeconds
+	value.ResourceLimits = ossandbox.ResourceLimits{"cpu": resolved.CPU, "memory": resolved.Memory}
+	value.ResourceRequests = nil
+	value.Entrypoint = append([]string(nil), resolved.Entrypoint...)
+	value.NetworkPolicy = nil
+	value.CredentialProxy = nil
+	value.Volumes = nil
+	value.Platform = nil
+	value.Extensions = map[string]string{}
+	idempotencyKey := strings.TrimSpace(request.Header.Get("Idempotency-Key"))
+	if h.config.RequireIdempotency && !validIdempotencyKey(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "a valid Idempotency-Key header is required")
+		return
+	}
+	requestHash, err := createRequestHash(value, resolved)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "hash OpenSandbox create request")
+		return
+	}
+	assignmentName := ""
+	if idempotencyKey != "" {
+		assignmentName = idempotentAssignmentName(resolved.LogicalTenant, idempotencyKey)
+	}
 	h.createMu.Lock()
+	releaseAdmission := func() {}
 	if h.config.Admission != nil {
-		if err := h.config.Admission.AuthorizeCreate(request.Context(), bundleName, &value); err != nil {
+		release, err := h.config.Admission.AuthorizeCreate(request.Context(), bundleName, &value)
+		if err != nil {
 			h.createMu.Unlock()
 			h.logger.WarnContext(request.Context(), "sandbox creation rejected by tenant policy", "bundle", bundleName, "error", err)
 			writeError(w, http.StatusForbidden, "sandbox creation does not satisfy the tenant policy")
 			return
 		}
+		releaseAdmission = release
 	}
 
-	// TODO: persist a create-operation/idempotency record. A process crash after
-	// this create and before the upstream response can leave a pending assignment;
-	// synchronous errors below are compensated, but crash recovery needs durable
-	// operation intent or conservative stale-assignment garbage collection.
+	// The deterministic assignment is the durable operation record. The
+	// controller can recover its sandbox mapping from the upstream workload.
 	created, err := h.store.Create(request.Context(), assignment.CreateRequest{
 		Namespace:            h.config.Namespace,
+		Name:                 assignmentName,
 		GenerateName:         "assignment-",
+		TemplateName:         resolved.Name,
+		TemplateUID:          resolved.UID,
+		TemplateRevision:     resolved.Revision,
+		LogicalTenant:        resolved.LogicalTenant,
 		CapabilityBundleName: bundleName,
+		IdempotencyKey:       idempotencyKey,
+		RequestHash:          requestHash,
 	})
+	releaseAdmission()
 	h.createMu.Unlock()
 	if err != nil {
+		if errors.Is(err, assignment.ErrIdempotencyConflict) {
+			writeError(w, http.StatusConflict, "Idempotency-Key was reused with different sandbox intent")
+			return
+		}
 		h.writeStoreError(w, err)
+		return
+	}
+	if created.Existing {
+		if created.SandboxID == "" {
+			if time.Since(created.CreatedAt) >= h.config.PendingOperationTTL {
+				latest, getErr := h.store.Get(request.Context(), h.config.Namespace, created.Name)
+				if getErr != nil {
+					h.writeStoreError(w, getErr)
+					return
+				}
+				if latest.SandboxID != "" {
+					created = latest
+				} else {
+					if err := h.store.Delete(request.Context(), h.config.Namespace, created.Name); err != nil {
+						h.writeStoreError(w, err)
+						return
+					}
+					w.Header().Set("Retry-After", "1")
+					writeError(w, http.StatusServiceUnavailable, "stale sandbox create operation was expired; retry the request")
+					return
+				}
+			}
+		}
+		if created.SandboxID == "" {
+			w.Header().Set("Retry-After", "2")
+			writeError(w, http.StatusConflict, "sandbox create operation is still in progress")
+			return
+		}
+		replayBody, err := json.Marshal(createSandboxResponse{
+			ID: created.SandboxID, Status: ossandbox.SandboxStatus{State: ossandbox.StatePending},
+			CreatedAt: created.CreatedAt,
+			Extensions: map[string]string{
+				CapabilityProfileExtension:       resolved.CapabilityBundleName,
+				SandboxTemplateExtension:         resolved.Name,
+				SandboxTemplateRevisionExtension: resolved.Revision,
+			},
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "encode idempotent sandbox response")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(replayBody)
 		return
 	}
 
@@ -218,6 +348,7 @@ func (h *Handler) create(w http.ResponseWriter, request *http.Request) {
 	}
 	delete(value.Metadata, assignment.AssignmentLabel)
 	value.Metadata[assignment.AssignmentLabel] = created.Name
+	value.Metadata[SandboxTemplateExtension] = resolved.Name
 	value.Extensions[assignmentUIDExtension] = created.UID
 	forwardBody, err := json.Marshal(value)
 	if err != nil {
@@ -228,7 +359,6 @@ func (h *Handler) create(w http.ResponseWriter, request *http.Request) {
 
 	response, responseBody, err := h.doUpstream(request.Context(), http.MethodPost, "/sandboxes", request.Header, forwardBody)
 	if err != nil {
-		_ = h.store.Delete(request.Context(), h.config.Namespace, created.Name)
 		writeError(w, http.StatusBadGateway, "OpenSandbox is unavailable")
 		return
 	}
@@ -239,13 +369,10 @@ func (h *Handler) create(w http.ResponseWriter, request *http.Request) {
 	}
 	var createdSandbox createSandboxResponse
 	if err := json.Unmarshal(responseBody, &createdSandbox); err != nil || createdSandbox.ID == "" || createdSandbox.CreatedAt.IsZero() {
-		_ = h.store.Delete(request.Context(), h.config.Namespace, created.Name)
 		writeError(w, http.StatusBadGateway, "OpenSandbox returned an invalid create response")
 		return
 	}
 	if err := h.store.SetSandboxID(request.Context(), h.config.Namespace, created.Name, createdSandbox.ID); err != nil {
-		_ = h.store.Delete(request.Context(), h.config.Namespace, created.Name)
-		_, _, _ = h.doUpstream(request.Context(), http.MethodDelete, "/sandboxes/"+url.PathEscape(createdSandbox.ID), nil, nil)
 		writeError(w, http.StatusInternalServerError, "record OpenSandbox assignment")
 		return
 	}
@@ -254,7 +381,9 @@ func (h *Handler) create(w http.ResponseWriter, request *http.Request) {
 	if createdSandbox.Extensions == nil {
 		createdSandbox.Extensions = map[string]string{}
 	}
-	createdSandbox.Extensions[CapabilityProfileExtension] = profile
+	createdSandbox.Extensions[CapabilityProfileExtension] = resolved.CapabilityBundleName
+	createdSandbox.Extensions[SandboxTemplateExtension] = resolved.Name
+	createdSandbox.Extensions[SandboxTemplateRevisionExtension] = resolved.Revision
 	responseBody, err = json.Marshal(createdSandbox)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "encode OpenSandbox response")
@@ -263,14 +392,54 @@ func (h *Handler) create(w http.ResponseWriter, request *http.Request) {
 	copyResponse(w, response, responseBody)
 }
 
+func validIdempotencyKey(value string) bool {
+	if len(value) < 8 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '_' || character == '.' || character == ':' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func createRequestHash(value ossandbox.CreateSandboxRequest, template ResolvedTemplate) (string, error) {
+	payload, err := json.Marshal(struct {
+		Request          ossandbox.CreateSandboxRequest `json:"request"`
+		TemplateName     string                         `json:"templateName"`
+		TemplateUID      string                         `json:"templateUid"`
+		TemplateRevision string                         `json:"templateRevision"`
+	}{
+		Request: value, TemplateName: template.Name, TemplateUID: template.UID, TemplateRevision: template.Revision,
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("sha256:%x", sum[:]), nil
+}
+
+func idempotentAssignmentName(logicalTenant, key string) string {
+	sum := sha256.Sum256([]byte(logicalTenant + "\x00" + key))
+	return fmt.Sprintf("operation-%x", sum[:16])
+}
+
 func (h *Handler) pause(w http.ResponseWriter, request *http.Request, sandboxID string) {
 	value, err := h.store.GetBySandboxID(request.Context(), h.config.Namespace, sandboxID)
 	if apierrors.IsNotFound(err) {
-		h.proxy.ServeHTTP(w, request)
+		writeError(w, http.StatusNotFound, "sandbox assignment is unavailable")
 		return
 	}
 	if err != nil {
 		h.writeStoreError(w, err)
+		return
+	}
+	if !h.authorizeAssignment(w, request, value) {
 		return
 	}
 	if err := h.store.SetLifecycleFence(request.Context(), h.config.Namespace, value.Name, true, ""); err != nil {
@@ -297,11 +466,14 @@ func (h *Handler) pause(w http.ResponseWriter, request *http.Request, sandboxID 
 func (h *Handler) resume(w http.ResponseWriter, request *http.Request, sandboxID string) {
 	value, err := h.store.GetBySandboxID(request.Context(), h.config.Namespace, sandboxID)
 	if apierrors.IsNotFound(err) {
-		h.proxy.ServeHTTP(w, request)
+		writeError(w, http.StatusNotFound, "sandbox assignment is unavailable")
 		return
 	}
 	if err != nil {
 		h.writeStoreError(w, err)
+		return
+	}
+	if !h.authorizeAssignment(w, request, value) {
 		return
 	}
 	oldPodUID := ""
@@ -329,11 +501,14 @@ func (h *Handler) resume(w http.ResponseWriter, request *http.Request, sandboxID
 func (h *Handler) delete(w http.ResponseWriter, request *http.Request, sandboxID string) {
 	value, err := h.store.GetBySandboxID(request.Context(), h.config.Namespace, sandboxID)
 	if apierrors.IsNotFound(err) {
-		h.proxy.ServeHTTP(w, request)
+		writeError(w, http.StatusNotFound, "sandbox assignment is unavailable")
 		return
 	}
 	if err != nil {
 		h.writeStoreError(w, err)
+		return
+	}
+	if !h.authorizeAssignment(w, request, value) {
 		return
 	}
 	if err := h.store.Delete(request.Context(), h.config.Namespace, value.Name); err != nil && !apierrors.IsNotFound(err) {
@@ -343,7 +518,12 @@ func (h *Handler) delete(w http.ResponseWriter, request *http.Request, sandboxID
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Handler) patchMetadata(w http.ResponseWriter, request *http.Request) {
+func (h *Handler) patchMetadata(w http.ResponseWriter, request *http.Request, sandboxID string) {
+	if h.config.CallerAuthorizer != nil {
+		if _, ok := h.authorizedAssignment(w, request, sandboxID); !ok {
+			return
+		}
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, request.Body, 1<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid metadata patch")
@@ -354,13 +534,42 @@ func (h *Handler) patchMetadata(w http.ResponseWriter, request *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid metadata patch")
 		return
 	}
-	if _, reserved := patch[assignment.AssignmentLabel]; reserved {
-		writeError(w, http.StatusForbidden, "assignment metadata is reserved")
-		return
+	for _, reservedKey := range []string{assignment.AssignmentLabel, SandboxTemplateExtension} {
+		if _, reserved := patch[reservedKey]; reserved {
+			writeError(w, http.StatusForbidden, "governance metadata is reserved")
+			return
+		}
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	request.ContentLength = int64(len(body))
 	h.proxy.ServeHTTP(w, request)
+}
+
+func (h *Handler) authorizedAssignment(w http.ResponseWriter, request *http.Request, sandboxID string) (*assignment.Assignment, bool) {
+	value, err := h.store.GetBySandboxID(request.Context(), h.config.Namespace, sandboxID)
+	if apierrors.IsNotFound(err) {
+		writeError(w, http.StatusNotFound, "sandbox assignment is unavailable")
+		return nil, false
+	}
+	if err != nil {
+		h.writeStoreError(w, err)
+		return nil, false
+	}
+	if !h.authorizeAssignment(w, request, value) {
+		return nil, false
+	}
+	return value, true
+}
+
+func (h *Handler) authorizeAssignment(w http.ResponseWriter, request *http.Request, value *assignment.Assignment) bool {
+	if h.config.CallerAuthorizer == nil {
+		return true
+	}
+	if value.LogicalTenant == "" || h.config.CallerAuthorizer.AuthorizeTenant(request.Context(), value.LogicalTenant) != nil {
+		writeError(w, http.StatusForbidden, "caller is not authorized for the sandbox")
+		return false
+	}
+	return true
 }
 
 func (h *Handler) waitReady(ctx context.Context, name string, wanted bool) error {
@@ -391,6 +600,9 @@ func (h *Handler) doUpstream(ctx context.Context, method, path string, headers h
 		return nil, nil, err
 	}
 	for name, values := range headers {
+		if strings.EqualFold(name, "Authorization") {
+			continue
+		}
 		for _, value := range values {
 			request.Header.Add(name, value)
 		}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -25,7 +24,7 @@ var checkerEgressEventsGVR = schema.GroupVersionResource{
 	Group: "aks-sandbox.azure.com", Version: "v1alpha1", Resource: "sandboxegressevents",
 }
 
-// AuditMetricsSnapshot is a point-in-time view of asynchronous audit counters.
+// AuditMetricsSnapshot is a point-in-time view of audit counters.
 type AuditMetricsSnapshot struct {
 	Enqueued uint64
 	Written  uint64
@@ -33,9 +32,9 @@ type AuditMetricsSnapshot struct {
 	Errors   uint64
 }
 
-// AuditSink accepts authorization decisions without blocking request handling.
+// AuditSink durably records authorization decisions.
 type AuditSink interface {
-	Enqueue(Decision) bool
+	Record(context.Context, Decision) error
 	Metrics() AuditMetricsSnapshot
 }
 
@@ -46,30 +45,20 @@ type auditMetrics struct {
 	errors   atomic.Uint64
 }
 
-type queuedAuditRecord struct {
-	decision  Decision
-	timestamp time.Time
-}
-
-// KubernetesAuditSink asynchronously writes immutable SandboxEgressEvent
-// resources and performs idempotent event retention/request expiry cleanup.
+// KubernetesAuditSink writes immutable SandboxEgressEvent resources before an
+// allow is returned and performs idempotent retention/request expiry cleanup.
 type KubernetesAuditSink struct {
 	client          dynamic.Interface
 	namespace       string
 	retention       time.Duration
 	cleanupInterval time.Duration
 	logger          *slog.Logger
-	queue           chan queuedAuditRecord
 	metrics         auditMetrics
 	now             func() time.Time
-	lifecycleMu     sync.RWMutex
-	accepting       bool
-	startOnce       sync.Once
-	shutdownOnce    sync.Once
-	writerDone      chan struct{}
+	accepting       atomic.Bool
 }
 
-// NewKubernetesAuditSink creates a bounded non-blocking audit sink.
+// NewKubernetesAuditSink creates a synchronous fail-closed audit sink.
 func NewKubernetesAuditSink(
 	client dynamic.Interface,
 	namespace string,
@@ -99,29 +88,25 @@ func NewKubernetesAuditSink(
 	if cleanupInterval > 15*time.Minute {
 		cleanupInterval = 15 * time.Minute
 	}
-	return &KubernetesAuditSink{
+	sink := &KubernetesAuditSink{
 		client:          client,
 		namespace:       namespace,
 		retention:       retention,
 		cleanupInterval: cleanupInterval,
 		logger:          logger,
-		queue:           make(chan queuedAuditRecord, queueSize),
 		now:             time.Now,
-		accepting:       true,
-		writerDone:      make(chan struct{}),
-	}, nil
+	}
+	sink.accepting.Store(true)
+	return sink, nil
 }
 
-// Start runs the audit writer and cleanup loops until the context is canceled.
+// Start runs cleanup until the context is canceled.
 func (s *KubernetesAuditSink) Start(ctx context.Context) {
-	s.startOnce.Do(func() {
-		go s.writeLoop()
-		go s.cleanupLoop(ctx)
-	})
+	go s.cleanupLoop(ctx)
 }
 
-// Enqueue adds a sanitized decision to the bounded queue without waiting.
-func (s *KubernetesAuditSink) Enqueue(decision Decision) bool {
+// Record writes a sanitized decision before returning.
+func (s *KubernetesAuditSink) Record(ctx context.Context, decision Decision) error {
 	decision = sanitizeDecision(decision)
 	if decision.AssignmentName == "" || decision.AssignmentUID == "" || decision.PodUID == "" ||
 		decision.CapabilityBundleName == "" || decision.CapabilityBundleRevision == "" ||
@@ -129,50 +114,28 @@ func (s *KubernetesAuditSink) Enqueue(decision Decision) bool {
 		decision.Reason == "" || decision.Source == "" {
 		s.metrics.errors.Add(1)
 		s.metrics.dropped.Add(1)
-		s.logger.Warn("dropping incomplete authorization audit record")
-		return false
+		return fmt.Errorf("authorization audit record is incomplete")
 	}
-	record := queuedAuditRecord{decision: decision, timestamp: s.now()}
-	s.lifecycleMu.RLock()
-	defer s.lifecycleMu.RUnlock()
-	if !s.accepting {
+	if !s.accepting.Load() {
 		s.metrics.dropped.Add(1)
-		s.logger.Warn("dropping authorization audit record", "reason", "sink shutting down")
-		return false
+		return fmt.Errorf("authorization audit sink is shutting down")
 	}
-	select {
-	case s.queue <- record:
-		s.metrics.enqueued.Add(1)
-		return true
-	default:
-		s.metrics.dropped.Add(1)
-		s.logger.Warn("dropping authorization audit record", "reason", "queue full")
-		return false
+	s.metrics.enqueued.Add(1)
+	if err := s.write(ctx, decision, s.now()); err != nil {
+		s.metrics.errors.Add(1)
+		return err
 	}
+	s.metrics.written.Add(1)
+	return nil
 }
 
-// Shutdown stops accepting records and drains all queued decisions before the
-// deadline. Call it only after authorization request handling has stopped.
-func (s *KubernetesAuditSink) Shutdown(ctx context.Context) error {
-	s.shutdownOnce.Do(func() {
-		s.lifecycleMu.Lock()
-		s.accepting = false
-		close(s.queue)
-		s.lifecycleMu.Unlock()
-	})
-	select {
-	case <-s.writerDone:
-		return nil
-	case <-ctx.Done():
-		remaining := uint64(len(s.queue))
-		if remaining > 0 {
-			s.metrics.dropped.Add(remaining)
-		}
-		return ctx.Err()
-	}
+// Shutdown stops accepting new records.
+func (s *KubernetesAuditSink) Shutdown(_ context.Context) error {
+	s.accepting.Store(false)
+	return nil
 }
 
-// Metrics returns asynchronous audit counters.
+// Metrics returns audit counters.
 func (s *KubernetesAuditSink) Metrics() AuditMetricsSnapshot {
 	return AuditMetricsSnapshot{
 		Enqueued: s.metrics.enqueued.Load(),
@@ -182,23 +145,8 @@ func (s *KubernetesAuditSink) Metrics() AuditMetricsSnapshot {
 	}
 }
 
-func (s *KubernetesAuditSink) writeLoop() {
-	defer close(s.writerDone)
-	for record := range s.queue {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := s.write(ctx, record)
-		cancel()
-		if err != nil {
-			s.metrics.errors.Add(1)
-			s.logger.Error("write authorization audit record", "error_category", auditErrorCategory(err))
-			continue
-		}
-		s.metrics.written.Add(1)
-	}
-}
-
-func (s *KubernetesAuditSink) write(ctx context.Context, record queuedAuditRecord) error {
-	event, err := egressEventForDecision(s.namespace, record.timestamp, record.decision)
+func (s *KubernetesAuditSink) write(ctx context.Context, decision Decision, timestamp time.Time) error {
+	event, err := egressEventForDecision(s.namespace, timestamp, decision)
 	if err != nil {
 		return err
 	}

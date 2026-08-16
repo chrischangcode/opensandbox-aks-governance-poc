@@ -79,8 +79,18 @@ func (s *Store) Create(ctx context.Context, request assignment.CreateRequest) (*
 			"namespace":    request.Namespace,
 			"name":         request.Name,
 			"generateName": request.GenerateName,
+			"annotations": map[string]any{
+				assignment.IdempotencyKeyAnnotation: request.IdempotencyKey,
+				assignment.RequestHashAnnotation:    request.RequestHash,
+			},
 		},
 		"spec": map[string]any{
+			"templateRef": map[string]any{
+				"name":         request.TemplateName,
+				"uid":          request.TemplateUID,
+				"specRevision": request.TemplateRevision,
+			},
+			"logicalTenant":       request.LogicalTenant,
 			"capabilityBundleRef": map[string]any{"name": request.CapabilityBundleName},
 		},
 	}}
@@ -89,6 +99,27 @@ func (s *Store) Create(ctx context.Context, request assignment.CreateRequest) (*
 	created, err := s.client.Resource(assignmentsGVR).Namespace(request.Namespace).Create(
 		ctx, object, metav1.CreateOptions{FieldValidation: metav1.FieldValidationStrict},
 	)
+	if apierrors.IsAlreadyExists(err) && request.Name != "" {
+		existing, getErr := s.client.Resource(assignmentsGVR).Namespace(request.Namespace).Get(
+			ctx, request.Name, metav1.GetOptions{},
+		)
+		if getErr != nil {
+			return nil, getErr
+		}
+		annotations := existing.GetAnnotations()
+		logicalTenant, _, _ := unstructured.NestedString(existing.Object, "spec", "logicalTenant")
+		if annotations[assignment.IdempotencyKeyAnnotation] != request.IdempotencyKey ||
+			annotations[assignment.RequestHashAnnotation] != request.RequestHash ||
+			logicalTenant != request.LogicalTenant {
+			return nil, assignment.ErrIdempotencyConflict
+		}
+		result, convertErr := convert(existing)
+		if convertErr != nil {
+			return nil, convertErr
+		}
+		result.Existing = true
+		return result, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox assignment: %w", err)
 	}
@@ -192,12 +223,27 @@ func convert(object *unstructured.Unstructured) (*assignment.Assignment, error) 
 	if err != nil {
 		return nil, fmt.Errorf("read capability bundle reference: %w", err)
 	}
+	templateName, _, err := unstructured.NestedString(object.Object, "spec", "templateRef", "name")
+	if err != nil {
+		return nil, fmt.Errorf("read sandbox template reference: %w", err)
+	}
+	templateUID, _, _ := unstructured.NestedString(object.Object, "spec", "templateRef", "uid")
+	templateRevision, _, _ := unstructured.NestedString(object.Object, "spec", "templateRef", "specRevision")
+	logicalTenant, _, _ := unstructured.NestedString(object.Object, "spec", "logicalTenant")
 	result := &assignment.Assignment{
 		Namespace:            object.GetNamespace(),
 		Name:                 object.GetName(),
 		UID:                  string(object.GetUID()),
 		ResourceVersion:      object.GetResourceVersion(),
+		TemplateName:         templateName,
+		TemplateUID:          templateUID,
+		TemplateRevision:     templateRevision,
+		LogicalTenant:        logicalTenant,
 		CapabilityBundleName: bundleName,
+		SandboxID:            object.GetAnnotations()[assignment.SandboxIDAnnotation],
+		IdempotencyKey:       object.GetAnnotations()[assignment.IdempotencyKeyAnnotation],
+		RequestHash:          object.GetAnnotations()[assignment.RequestHashAnnotation],
+		CreatedAt:            object.GetCreationTimestamp().Time,
 		Deleting:             object.GetDeletionTimestamp() != nil,
 	}
 
@@ -222,6 +268,9 @@ func convert(object *unstructured.Unstructured) (*assignment.Assignment, error) 
 		}
 	}
 	result.WorkloadRef = objectReference(object.Object, "workloadRef")
+	if result.SandboxID == "" && result.WorkloadRef != nil {
+		result.SandboxID = result.WorkloadRef.Name
+	}
 	result.PodRef = objectReference(object.Object, "podRef")
 	return result, nil
 }

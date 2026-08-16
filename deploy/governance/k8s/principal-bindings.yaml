@@ -1,0 +1,30 @@
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: SandboxPrincipalBinding
+metadata:
+  name: poc-requester
+  namespace: aks-sandbox-system
+spec:
+  tenantId: 00000000-0000-4000-8000-000000000001
+  objectId: 00000000-0000-4000-8000-000000000010
+  requesterTenants: [tenant-a]
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: SandboxPrincipalBinding
+metadata:
+  name: poc-administrator
+  namespace: aks-sandbox-system
+spec:
+  tenantId: 00000000-0000-4000-8000-000000000001
+  objectId: 00000000-0000-4000-8000-000000000020
+  requesterTenants: [tenant-a]
+  adminTenants: [tenant-a]
+---
+apiVersion: aks-sandbox.azure.com/v1alpha1
+kind: SandboxPrincipalBinding
+metadata:
+  name: assignmentd-harness
+  namespace: aks-sandbox-system
+spec:
+  serviceAccountNamespace: aks-sandbox-system
+  serviceAccountName: assignmentd-harness
+  requesterTenants: [tenant-a]
