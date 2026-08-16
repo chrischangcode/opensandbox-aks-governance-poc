@@ -8,7 +8,7 @@ This report is the source of truth for controls proven by the POC. See
 unresolved Azure-service security, durability, tenancy, egress, and operability
 work.
 
-Date: 2026-08-15
+Date: 2026-08-16
 
 This demonstration used a disposable AKS cluster with an isolated Kata node,
 OpenSandbox, the assignment governance service, two loopback-only dashboard
@@ -31,7 +31,7 @@ included below.
 | Snapshot continuity | State survives pause/resume while pre-snapshot authority becomes invalid |
 | Cleanup | Ephemeral assignment, workload, and Pod absence is confirmed before success |
 
-## Verified P0 service boundaries
+## Implemented service boundaries
 
 The POC proves the following service-boundary behavior through reproducible live
 experiments. These are implemented controls, not proposed architecture.
@@ -51,40 +51,24 @@ experiments. These are implemented controls, not proposed architecture.
 | Snapshot identity rotation | Pause/resume preserved workspace state, created a new Pod UID, and rejected credentials or authority tied to the previous sandbox incarnation. |
 | Agent execution boundary | The OpenCode `sandbox-only` agent executes commands through dynamically created governed Kata sandboxes rather than using host shell or filesystem tools. |
 
-The latest successful integrated replay was captured in:
+The latest successful full replay wrote all service evidence into one artifact
+tree:
 
 ```text
-demo-output/20260816T193325Z/
+demo-output/20260816T194552Z/
   extended-governance/
-  p0-fault/
-  p0-key-rotation/
-  p0-boundaries/
+  service-faults/
+  key-rotation/
+  service-boundaries/
 ```
 
-Earlier component-level evidence remains under
-`demo-output/p0-20260816T191432Z`,
-`demo-output/p0-fault-20260816T190955Z`,
-`demo-output/p0-rotation-20260816T190904Z`, and
-`demo-output/20260816T191604Z-extended`.
-
-Run the visual product demonstration and every P0 boundary experiment together:
+Run the visual product demonstration and every implemented service scenario:
 
 ```bash
-./scripts/live-demo.sh --no-pause --p0-boundaries
+./scripts/live-demo.sh --no-pause
 ```
 
-The boundary suite can also be run independently:
-
-```bash
-./scripts/extended-governance-demo.sh
-./scripts/p0-fault-experiments.sh
-./scripts/p0-key-rotation-experiment.sh
-./scripts/p0-live-experiments.sh
-kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
-  --ignore-not-found
-```
-
-The main demo removes the forced-egress policies after the proof so the current
+The full demo removes the forced-egress policies after the proof so the current
 `external-mediator` OpenCode flow remains usable. A production service should
 instead make a transparent, fail-closed identity and egress data plane mandatory.
 Controlled DNS, regional state, Azure identity, physical tenancy, and lifecycle
@@ -199,13 +183,7 @@ The replay creates its demonstration capability boundary and template through
 the admin HTTP workflow, verifies that the corresponding Kubernetes custom
 resources exist, and removes them during cleanup.
 
-The companion replay exercises the newer governance experiments:
-
-```bash
-./scripts/extended-governance-demo.sh
-```
-
-It runs the readiness doctor, displays logical-tenant budgets, executes
+The same replay then runs the readiness doctor, displays logical-tenant budgets, executes
 automatic sandbox validation, proves short-lived credential revocation and
 replay denial, and pauses/snapshots/resumes a sandbox while verifying state
 continuity, Pod UID rotation, and rejection of pre-snapshot authority.
@@ -213,9 +191,9 @@ continuity, Pod UID rotation, and rejection of pre-snapshot authority.
 The script creates Kubernetes Secret `assignmentd-credential-broker` from an
 `openssl`-generated value piped directly to `kubectl`, then unsets the shell
 value. The key is not printed or committed. Terminal evidence is written under
-`demo-output/<timestamp>-extended/`.
+`demo-output/<timestamp>/extended-governance/`.
 
-The live extended replay completed on 2026-08-16. Representative sanitized
+The full live replay completed on 2026-08-16. Representative sanitized
 evidence:
 
 ```text

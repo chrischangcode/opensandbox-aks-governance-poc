@@ -4,7 +4,7 @@ This document contains only the service-boundary work that remains unresolved or
 partially proven after the OpenSandbox-on-AKS governance POC.
 
 The controls already demonstrated live are documented in
-[live-demo-report.md](live-demo-report.md#verified-p0-service-boundaries). They include
+[live-demo-report.md](live-demo-report.md#implemented-service-boundaries). They include
 trusted lifecycle templates, authenticated logical-tenant authorization, durable
 idempotency and recovery, distributed quota admission, synchronous fail-closed audit,
 forced egress, per-sandbox attribution, credential revocation and key rotation, and
@@ -136,23 +136,12 @@ success or silently left fenced.
 
 ## Reproducing the proven baseline
 
-Run the complete presentation and boundary suite:
+Run the complete POC:
 
 ```bash
-./scripts/live-demo.sh --no-pause --p0-boundaries
+./scripts/live-demo.sh --no-pause
 ```
 
-Or run the boundary experiments independently:
-
-```bash
-./scripts/extended-governance-demo.sh
-./scripts/p0-fault-experiments.sh
-./scripts/p0-key-rotation-experiment.sh
-./scripts/p0-live-experiments.sh
-kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
-  --ignore-not-found
-```
-
-The last cleanup restores the external-mediator demo path after the forced-egress proof.
-See [live-demo-report.md](live-demo-report.md#verified-p0-service-boundaries) for expected
+The replay restores the external-mediator demo path after the forced-egress proof.
+See [live-demo-report.md](live-demo-report.md#implemented-service-boundaries) for expected
 results and sanitized evidence locations.

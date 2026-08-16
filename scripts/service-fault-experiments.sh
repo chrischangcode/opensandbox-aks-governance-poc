@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 assignment_namespace="${ASSIGNMENT_NAMESPACE:-aks-sandbox-system}"
-output_dir="${P0_FAULT_OUTPUT_DIR:-$repo_root/demo-output/p0-fault-$(date -u +%Y%m%dT%H%M%SZ)}"
+output_dir="${SERVICE_FAULT_OUTPUT_DIR:-$repo_root/demo-output/service-faults-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$output_dir"
 
 forward_pids=()
@@ -228,4 +228,4 @@ printf 'assignment=%s\nrecoveredSandbox=%s\n' \
   "$recovery_assignment" "$recovered" |
   tee "$output_dir/recovery-summary.txt"
 
-echo "P0 fault experiments passed; evidence: $output_dir"
+echo "Service fault experiments passed; evidence: $output_dir"

@@ -22,7 +22,7 @@ It extends the public [AKS Kata example](https://github.com/opensandbox-group/Op
 ## See it in action
 
 [Open the visual live-demo report](docs/live-demo-report.md), including the
-architecture, exact redacted commands, terminal transcripts, verified P0
+architecture, exact redacted commands, terminal transcripts, implemented
 service boundaries, and replay steps. The
 [remaining P0 service work](docs/p0-service-boundary-findings.md) contains only
 the unresolved or partially proven work required for an Azure service.
@@ -389,8 +389,11 @@ The script:
 4. Creates a Kata sandbox for the egress demonstration.
 5. Produces deny, request, approve, and allow decisions through the real pages.
 6. Captures screenshots and terminal logs under `demo-output/<timestamp>/`.
-7. Keeps the pages open until Enter is pressed, then deletes its sandbox and
-   stops only the local processes it created.
+7. Pauses so the visual product state can be presented.
+8. Runs tenant-budget, validation, credential, snapshot, fault, key-rotation,
+   lifecycle, recovery, forced-egress, and attribution scenarios.
+9. Removes the temporary forced-egress policies, restores the dashboard
+   port-forward, and confirms all ephemeral sandbox resources are gone.
 
 For an unattended replay:
 
@@ -398,43 +401,9 @@ For an unattended replay:
 ./scripts/live-demo.sh --no-pause
 ```
 
-Run the presentation plus every verified P0 boundary experiment:
-
-```bash
-./scripts/live-demo.sh --no-pause --p0-boundaries
-```
-
-That mode closes the presentation sandbox, then runs tenant-budget, validation,
-credential, snapshot, fault, signing-key rotation, lifecycle, recovery,
-forced-egress, and attribution experiments. It removes the forced-egress
-policies afterward so the current `external-mediator` OpenCode flow remains
-usable.
-
-Run those boundary experiments independently with:
-
-```bash
-./scripts/extended-governance-demo.sh
-./scripts/p0-fault-experiments.sh
-./scripts/p0-key-rotation-experiment.sh
-./scripts/p0-live-experiments.sh
-kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
-  --ignore-not-found
-```
-
-Set `RUN_OPENCODE=false` to demonstrate only the governance UI and egress flow,
-or `CAPTURE_SCREENSHOTS=false` to skip screenshots.
-
-Run the extended governance demonstration with:
-
-```bash
-./scripts/extended-governance-demo.sh
-```
-
-It applies tenant policies, creates the broker signing Secret without printing
-the key, restarts `assignmentd`, runs the doctor, captures tenant budgets,
-executes automatic sandbox validation, proves credential revocation and replay
-denial, and exercises snapshot pause/resume with Pod identity rotation.
-Evidence is written under `demo-output/<timestamp>-extended/`. Set
+Both commands run the same complete POC; `--no-pause` only removes the
+presentation pauses. Set `RUN_OPENCODE=false` to skip the redundant OpenCode
+presentation step, `CAPTURE_SCREENSHOTS=false` to skip screenshots, or
 `RUN_SNAPSHOT=false` only when the cluster was intentionally installed without
 snapshot prerequisites.
 

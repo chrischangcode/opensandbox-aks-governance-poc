@@ -6,7 +6,7 @@ cd "$repo_root"
 
 namespace="${ASSIGNMENT_NAMESPACE:-aks-sandbox-system}"
 workload_namespace="${WORKLOAD_NAMESPACE:-opensandbox}"
-output_dir="${P0_ROTATION_OUTPUT_DIR:-$repo_root/demo-output/p0-rotation-$(date -u +%Y%m%dT%H%M%SZ)}"
+output_dir="${KEY_ROTATION_OUTPUT_DIR:-$repo_root/demo-output/key-rotation-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$output_dir"
 
 forward_pid=""
@@ -207,4 +207,4 @@ printf 'graceStatus=%s\nstaleStatus=%s\nassignment=%s\nsandbox=%s\n' \
   tee "$output_dir/summary.txt"
 
 unset credential identity_token lifecycle_token new_key
-echo "P0 key rotation experiment passed; evidence: $output_dir"
+echo "Key rotation experiment passed; evidence: $output_dir"

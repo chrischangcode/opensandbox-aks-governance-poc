@@ -5,17 +5,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 pause=true
-run_p0_boundaries="${RUN_P0_BOUNDARIES:-false}"
 while (($# > 0)); do
   case "$1" in
     --no-pause)
       pause=false
       ;;
-    --p0-boundaries)
-      run_p0_boundaries=true
-      ;;
     *)
-      echo "usage: $0 [--no-pause] [--p0-boundaries]" >&2
+      echo "usage: $0 [--no-pause]" >&2
       exit 2
       ;;
   esac
@@ -57,7 +53,7 @@ admin_template_name="demo-python-web-reader-$run_suffix"
 admin_bundle_created=false
 admin_template_created=false
 assignmentd_token_file="$output_dir/assignmentd-token"
-p0_network_policy_applied=false
+forced_egress_policy_applied=false
 
 delete_sandbox_and_wait() {
   local id="$1"
@@ -127,7 +123,7 @@ cleanup() {
     kubectl -n "$assignment_namespace" delete capabilitybundle \
         "$admin_bundle_name" --ignore-not-found >/dev/null 2>&1 || exit_code=1
   fi
-  if [[ "$p0_network_policy_applied" == "true" ]]; then
+  if [[ "$forced_egress_policy_applied" == "true" ]]; then
     kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
       --ignore-not-found >/dev/null 2>&1 || exit_code=1
   fi
@@ -726,34 +722,37 @@ capture_page \
   false \
   520
 
-if [[ "$run_p0_boundaries" == "true" ]]; then
-  echo "==> Closing the presentation sandbox before P0 fault experiments"
-  delete_sandbox_and_wait "$sandbox_id" "$pod_name"
-  sandbox_status="cleaned"
-
-  echo "==> Replaying verified P0 service boundaries"
-  EXTENDED_DEMO_OUTPUT_DIR="$output_dir/extended-governance" \
-    ./scripts/extended-governance-demo.sh
-  P0_FAULT_OUTPUT_DIR="$output_dir/p0-fault" \
-    ./scripts/p0-fault-experiments.sh
-  P0_ROTATION_OUTPUT_DIR="$output_dir/p0-key-rotation" \
-    ./scripts/p0-key-rotation-experiment.sh
-  p0_network_policy_applied=true
-  P0_OUTPUT_DIR="$output_dir/p0-boundaries" \
-    ./scripts/p0-live-experiments.sh
-  kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
-    --ignore-not-found >/dev/null
-  p0_network_policy_applied=false
-
-  wait_for_closed_port "$assignment_port" assignment-port-forward
-  wait_for_closed_port "$authz_port" assignment-port-forward
-  start_background assignment-port-forward-after-p0 \
-    kubectl --address 127.0.0.1 port-forward \
-    -n "$assignment_namespace" svc/assignmentd \
-    "${assignment_port}:8080" "${authz_port}:9001"
-  wait_for_port "$assignment_port" assignment-port-forward-after-p0
-  wait_for_port "$authz_port" assignment-port-forward-after-p0
+if [[ "$pause" == "true" && -t 0 ]]; then
+  echo
+  read -r -p "Press Enter to continue with the full lifecycle, recovery, and fault scenarios..."
 fi
+
+echo "==> Closing the presentation sandbox before service fault scenarios"
+delete_sandbox_and_wait "$sandbox_id" "$pod_name"
+sandbox_status="cleaned"
+
+echo "==> Running the complete governed sandbox POC"
+EXTENDED_DEMO_OUTPUT_DIR="$output_dir/extended-governance" \
+  ./scripts/extended-governance-demo.sh
+SERVICE_FAULT_OUTPUT_DIR="$output_dir/service-faults" \
+  ./scripts/service-fault-experiments.sh
+KEY_ROTATION_OUTPUT_DIR="$output_dir/key-rotation" \
+  ./scripts/key-rotation-experiment.sh
+forced_egress_policy_applied=true
+SERVICE_BOUNDARY_OUTPUT_DIR="$output_dir/service-boundaries" \
+  ./scripts/service-boundary-experiments.sh
+kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
+  --ignore-not-found >/dev/null
+forced_egress_policy_applied=false
+
+wait_for_closed_port "$assignment_port" assignment-port-forward
+wait_for_closed_port "$authz_port" assignment-port-forward
+start_background assignment-port-forward-after-boundaries \
+  kubectl --address 127.0.0.1 port-forward \
+  -n "$assignment_namespace" svc/assignmentd \
+  "${assignment_port}:8080" "${authz_port}:9001"
+wait_for_port "$assignment_port" assignment-port-forward-after-boundaries
+wait_for_port "$authz_port" assignment-port-forward-after-boundaries
 
 cat <<EOF
 
@@ -765,7 +764,7 @@ Access request: $request_name
 Admin bundle:   $admin_bundle_name
 Admin template: $admin_template_name
 Artifacts:     $output_dir
-P0 boundaries: $run_p0_boundaries
+Service boundaries: included
 
 Requester: http://127.0.0.1:${requester_port}/dashboard/
 Access:    http://127.0.0.1:${requester_port}/dashboard/access
@@ -774,9 +773,5 @@ EOF
 
 if [[ "$pause" == "true" && -t 0 ]]; then
   echo
-  if [[ "$run_p0_boundaries" == "true" ]]; then
-    read -r -p "Press Enter to stop local services..."
-  else
-    read -r -p "Press Enter to delete the demo sandbox and stop local services..."
-  fi
+  read -r -p "Press Enter to stop local services..."
 fi

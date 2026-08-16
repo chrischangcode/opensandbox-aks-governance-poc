@@ -10,7 +10,7 @@ lifecycle_url="${LIFECYCLE_URL:-}"
 authz_address="${AUTHZ_ADDRESS:-}"
 manage_forwards="${MANAGE_PORT_FORWARDS:-true}"
 template_name="${SANDBOX_TEMPLATE:-python-kata-web-reader-v1}"
-output_dir="${P0_OUTPUT_DIR:-$repo_root/demo-output/p0-$(date -u +%Y%m%dT%H%M%SZ)}"
+output_dir="${SERVICE_BOUNDARY_OUTPUT_DIR:-$repo_root/demo-output/service-boundaries-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$output_dir"
 
 token=""
@@ -111,7 +111,7 @@ body="$(
     entrypoint: ["sh", "-c", "sleep infinity"],
     resourceLimits: {cpu: "99", memory: "99Gi"},
     volumes: [{name: "forged"}],
-    metadata: {"demo": "p0-live"},
+    metadata: {"demo": "service-boundaries"},
     extensions: {
       "aks-sandbox.azure.com/template": $template,
       "aks-sandbox.azure.com/capabilityProfile": "forged"
@@ -124,7 +124,7 @@ status="$(curl -sS -o /dev/null -w '%{http_code}' \
   --data "$body" "$lifecycle_url/sandboxes")"
 assert_status 400 "$status" "missing idempotency key rejected"
 
-idempotency_key="p0-live-$(date -u +%s)-$RANDOM"
+idempotency_key="service-boundaries-$(date -u +%s)-$RANDOM"
 curl -fsS \
   -H "Authorization: Bearer $token" \
   -H "Idempotency-Key: $idempotency_key" \
@@ -286,4 +286,4 @@ fi
 echo "$latest_event" | jq >"$output_dir/latest-egress-event.json"
 echo "PASS mediated decision attributed to exact assignment and Pod UID"
 
-echo "P0 live experiments passed; evidence: $output_dir"
+echo "Service-boundary experiments passed; evidence: $output_dir"
