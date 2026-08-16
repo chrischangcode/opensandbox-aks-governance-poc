@@ -22,10 +22,10 @@ It extends the public [AKS Kata example](https://github.com/opensandbox-group/Op
 ## See it in action
 
 [Open the visual live-demo report](docs/live-demo-report.md), including the
-architecture, exact redacted commands, terminal transcripts, and replay steps.
-The [P0 managed-service boundary findings](docs/p0-service-boundary-findings.md)
-summarize the security, durability, tenancy, egress, credential, and operability
-experiments and the remaining Azure service work.
+architecture, exact redacted commands, terminal transcripts, verified P0
+service boundaries, and replay steps. The
+[remaining P0 service work](docs/p0-service-boundary-findings.md) contains only
+the unresolved or partially proven work required for an Azure service.
 
 | Running Kata sandbox | Administrator capability editor |
 |---|---|
@@ -288,7 +288,8 @@ become ready and mediated egress is denied.
   controller leader election, and per-tenant Kubernetes Leases that serialize
   budget admission across replicas.
 - Audit events omit headers, query strings, bodies, credentials, tokens, and source IPs.
-- The asynchronous audit queue cannot turn a valid allow into a deny.
+- Required authorization audit is synchronous and fail closed: if the audit
+  record cannot be persisted, an otherwise valid allow becomes a deny.
 - Logical tenants in this POC are governance labels, not Azure tenant or Kubernetes namespace isolation.
 
 The `egress-probe` exercises the same authorization and telemetry path used by an egress gateway. It does not itself forward network packets.
@@ -397,6 +398,29 @@ For an unattended replay:
 ./scripts/live-demo.sh --no-pause
 ```
 
+Run the presentation plus every verified P0 boundary experiment:
+
+```bash
+./scripts/live-demo.sh --no-pause --p0-boundaries
+```
+
+That mode closes the presentation sandbox, then runs tenant-budget, validation,
+credential, snapshot, fault, signing-key rotation, lifecycle, recovery,
+forced-egress, and attribution experiments. It removes the forced-egress
+policies afterward so the current `external-mediator` OpenCode flow remains
+usable.
+
+Run those boundary experiments independently with:
+
+```bash
+./scripts/extended-governance-demo.sh
+./scripts/p0-fault-experiments.sh
+./scripts/p0-key-rotation-experiment.sh
+./scripts/p0-live-experiments.sh
+kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
+  --ignore-not-found
+```
+
 Set `RUN_OPENCODE=false` to demonstrate only the governance UI and egress flow,
 or `CAPTURE_SCREENSHOTS=false` to skip screenshots.
 
@@ -414,10 +438,10 @@ Evidence is written under `demo-output/<timestamp>-extended/`. Set
 `RUN_SNAPSHOT=false` only when the cluster was intentionally installed without
 snapshot prerequisites.
 
-The live POC's logical tenants share the `opensandbox` namespace. Separate
-namespaces, ServiceAccounts, and node pools remain necessary for stronger
-Kubernetes multi-tenancy. Admission-injected projected sidecars, provider-backed
-credential exchange, and governed browser sessions are future experiments.
+The live-demo report is authoritative for proven behavior. Physical tenancy,
+regional metadata, transparent egress injection with controlled DNS, Azure
+identity and key integration, and managed-service operability remain in
+[remaining P0 service work](docs/p0-service-boundary-findings.md).
 
 ## Cleanup
 

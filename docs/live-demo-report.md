@@ -3,8 +3,10 @@
 > Admin-approved templates, Kata isolation, sandbox-only agent execution,
 > per-sandbox egress attribution, and exact temporary access grants.
 
-See [P0 managed-service boundary findings](p0-service-boundary-findings.md) for
-the security, durability, tenancy, egress, and operability assessment.
+This report is the source of truth for controls proven by the POC. See
+[remaining P0 service work](p0-service-boundary-findings.md) for only the
+unresolved Azure-service security, durability, tenancy, egress, and operability
+work.
 
 Date: 2026-08-15
 
@@ -28,6 +30,66 @@ included below.
 | Lifecycle authority | Broker grants and temporary access are bound to the current Pod UID |
 | Snapshot continuity | State survives pause/resume while pre-snapshot authority becomes invalid |
 | Cleanup | Ephemeral assignment, workload, and Pod absence is confirmed before success |
+
+## Verified P0 service boundaries
+
+The POC proves the following service-boundary behavior through reproducible live
+experiments. These are implemented controls, not proposed architecture.
+
+| Boundary | Verified behavior |
+|---|---|
+| Trusted lifecycle templates | The lifecycle API resolves the admin-owned template and overwrites caller-supplied image, resources, snapshot, and other protected runtime fields. Forged create requests cannot weaken the boundary. |
+| Lifecycle caller identity | A dedicated-audience Kubernetes ServiceAccount token is validated with TokenReview and mapped through `SandboxPrincipalBinding`. Missing, invalid, wrong-audience, and unauthorized-tenant tokens are rejected. |
+| Logical-tenant authorization | The authenticated principal, not request headers, determines which tenant can create, pause, resume, or delete a sandbox. Cross-tenant lifecycle access is denied. |
+| Idempotency and recovery | Deterministic operation records reject conflicting intent, replay the original operation across API replica replacement, and allow the controller to repair an ambiguous post-create mapping. |
+| Distributed quota admission | Two assignmentd API replicas serialize tenant admission through a Kubernetes Lease. A six-request concurrent burst admitted four and rejected two at the configured quota. |
+| Fail-closed authorization audit | Required egress audit is persisted synchronously. Removing audit write permission converts a request that policy would otherwise allow into a denial. |
+| Forced egress | Cilium default-deny policies blocked direct TCP, UDP, DNS, and DNS resolution. The exact mediated request was allowed without opening general network access. |
+| Per-sandbox attribution | Mediated egress records contain the immutable assignment identity and current Pod UID, tying traffic to one sandbox incarnation. |
+| Credential containment | Broker grants are exact-scope, assignment- and Pod-bound, durably revocable, and signed with a versioned key. Old-key credentials worked only during the configured rotation grace period. |
+| Durable metadata | OpenSandbox SQLite state survived a server restart on its PVC. This proves restart durability, not active/active regional availability. |
+| Snapshot identity rotation | Pause/resume preserved workspace state, created a new Pod UID, and rejected credentials or authority tied to the previous sandbox incarnation. |
+| Agent execution boundary | The OpenCode `sandbox-only` agent executes commands through dynamically created governed Kata sandboxes rather than using host shell or filesystem tools. |
+
+The latest successful integrated replay was captured in:
+
+```text
+demo-output/20260816T193325Z/
+  extended-governance/
+  p0-fault/
+  p0-key-rotation/
+  p0-boundaries/
+```
+
+Earlier component-level evidence remains under
+`demo-output/p0-20260816T191432Z`,
+`demo-output/p0-fault-20260816T190955Z`,
+`demo-output/p0-rotation-20260816T190904Z`, and
+`demo-output/20260816T191604Z-extended`.
+
+Run the visual product demonstration and every P0 boundary experiment together:
+
+```bash
+./scripts/live-demo.sh --no-pause --p0-boundaries
+```
+
+The boundary suite can also be run independently:
+
+```bash
+./scripts/extended-governance-demo.sh
+./scripts/p0-fault-experiments.sh
+./scripts/p0-key-rotation-experiment.sh
+./scripts/p0-live-experiments.sh
+kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
+  --ignore-not-found
+```
+
+The main demo removes the forced-egress policies after the proof so the current
+`external-mediator` OpenCode flow remains usable. A production service should
+instead make a transparent, fail-closed identity and egress data plane mandatory.
+Controlled DNS, regional state, Azure identity, physical tenancy, and lifecycle
+replay edge cases remain in
+[p0-service-boundary-findings.md](p0-service-boundary-findings.md).
 
 ## Product walkthrough
 

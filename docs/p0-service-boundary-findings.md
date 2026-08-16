@@ -1,108 +1,158 @@
-# P0 managed-service boundary findings
+# Remaining P0 Service Work
 
-This POC now has an experimentally verified path for the major P0 boundaries
-needed to turn OpenSandbox on AKS into an Azure service. It does not claim that
-the implementation itself is production-ready: several controls still need to
-move into Azure-managed infrastructure, and upstream OpenSandbox still has
-single-writer and Pod-template integration limits.
+This document contains only the service-boundary work that remains unresolved or
+partially proven after the OpenSandbox-on-AKS governance POC.
 
-## Result matrix
+The controls already demonstrated live are documented in
+[live-demo-report.md](live-demo-report.md#verified-p0-service-boundaries). They include
+trusted lifecycle templates, authenticated logical-tenant authorization, durable
+idempotency and recovery, distributed quota admission, synchronous fail-closed audit,
+forced egress, per-sandbox attribution, credential revocation and key rotation, and
+snapshot identity rotation.
 
-| P0 boundary | POC result | Production path or remaining work |
+## Executive summary
+
+The POC now has a credible path for the core Kubernetes enforcement boundaries, but it
+is not yet an Azure managed service. The remaining P0 work is concentrated in four
+areas:
+
+1. Replace single-cluster POC state and identity components with regional,
+   Azure-managed control-plane dependencies.
+2. Make transparent, fail-closed egress mediation usable for arbitrary sandbox
+   workloads, including controlled DNS.
+3. Close lifecycle edge cases around distributed fencing, idempotent replay, ambiguous
+   operations, and pause rollback.
+4. Define the operational, compliance, abuse, recovery, and billing contracts required
+   for a multitenant Azure service.
+
+## Residual P0 gaps
+
+| Area | Current POC boundary | Required service boundary |
 |---|---|---|
-| Trusted lifecycle input | **Closed in POC.** Callers select an immutable `SandboxTemplate`; image, entrypoint, resources, timeout, capability bundle, and tenant are resolved server-side. Caller snapshots, volumes, credentials, network policy, platform settings, and arbitrary extensions are removed. | Sign and version templates through a managed control plane. Add policy rollout, rollback, and regional propagation. |
-| Lifecycle caller authentication | **Closed in POC.** Assignmentd requires a dedicated-audience Kubernetes ServiceAccount token, validates it with TokenReview, binds it through `SandboxPrincipalBinding`, and strips it before proxying upstream. | Use managed workload identity or an Azure-issued service credential, private endpoints, and service-to-service mTLS. |
-| Tenant authorization | **Closed for logical tenants.** Request, approval, list, and lifecycle operations are tenant-scoped. Cross-tenant requests return `403`. | Map Azure tenant/subscription/resource identities to service-owned stamps. Logical isolation is not a substitute for separate Azure tenants, subscriptions, or clusters where required. |
-| Durable and idempotent create | **Path proven with a remaining edge.** Production creates require `Idempotency-Key`. The deterministic assignment CRD is the operation record; same key and intent replays, different intent returns `409`, and unrecovered pending records expire conservatively. | Store the exact original response and enough immutable template material to replay even after a template is disabled or removed. |
-| Distributed admission | **Path proven live.** Two assignmentd replicas serialize tenant admission with Kubernetes Leases. Six simultaneous creates pinned across both replicas admitted exactly four and rejected two at the configured tenant budget. | Replace Kubernetes Leases with a service-grade regional transaction or quota service if admission spans clusters. |
-| Ambiguous create recovery | **Path proven live.** Removing the committed sandbox mapping after upstream creation caused the controller to recover it from the matching `BatchSandbox`. | Add explicit operation phases, retry budgets, poison-operation handling, and reconciliation SLOs. |
-| Assignment service availability | **Path proven.** Assignmentd runs two API replicas, a single elected controller leader, `RollingUpdate`, and a PodDisruptionBudget. Replay survived replica replacement. | Add zone-aware topology spread, regional failover, overload protection, and tested disaster recovery. |
-| OpenSandbox metadata durability | **Partially closed.** SQLite is on an RWO PVC and survived server restart. | Upstream currently supports SQLite only. A managed service needs an external transactional store and active/active lifecycle APIs; PVC-backed `Recreate` is not a regional HA design. |
-| Forced egress | **Feasibility proven live.** AKS was moved to Cilium. Assigned sandbox Pods were default-denied and could reach only assignmentd; direct TCP, UDP, DNS, and name resolution failed while the exact mediated request succeeded. | Inject a trusted proxy/sidecar or node data plane, prevent bypass below L7, and add a controlled DNS resolver. The no-DNS proof is secure but not generally usable. |
-| Per-sandbox egress attribution | **Closed for the mediated path.** Pod-bound TokenReview identity, Pod UID, assignment UID, capability revision, method, host, and path are checked and audited. The external mediator derives the Pod address from the authenticated identity rather than trusting caller JSON. | The injected data plane must derive source from the trusted connection/proxy metadata and export immutable events to an Azure-owned telemetry pipeline. |
-| Fail-closed audit | **Path proven live.** Authorization writes the immutable event synchronously. Removing `create` permission on `SandboxEgressEvent` changed an otherwise allowed request to deny. | Use a replicated durable audit service, define latency/error budgets, and separate security evidence from customer diagnostics. |
-| Brokered credentials | **Closed in POC.** Credentials are exact-scope, short-lived, Pod-bound, never returned in reports, and use durable Kubernetes revocations. | Integrate Azure Key Vault/Managed Identity, backend-specific token exchange, hardware-backed service keys, and emergency revocation. |
-| Signing-key rotation | **Path proven live.** A credential signed by key ID `old` remained valid after rotation to `new` while the previous key was configured, then returned `401` after grace removal. | Automate rotation, overlap, key distribution, monitoring, and compromise response through a managed key service. |
-| Pause/resume | **Path proven live.** Snapshot pause/resume preserved state, replaced the Pod UID, rejected pre-snapshot authority, and cleaned up the old workload. | Define snapshot encryption, portability, retention, consistency, malware scanning, billing, and compatibility guarantees. |
-| Harness confinement | **Closed for the demo.** The OpenCode `sandbox-only` agent denies built-in host tools and can execute only through the governance MCP server, which dynamically creates approved sandboxes. | Enforce this outside prompt/configuration using service identity, broker policy, endpoint isolation, and signed harness attestations. |
+| Regional lifecycle state | `SandboxAssignment` records and Leases are durable inside one Kubernetes control plane. OpenSandbox metadata uses SQLite on a PVC. | Use an external, highly available regional metadata and operation store with conditional writes, backup/restore, regional failover, and tested disaster recovery. |
+| Admission fencing | A per-tenant Lease serializes quota admission across two API replicas. | Fence release by holder identity and object version so a stale holder cannot delete a Lease acquired by another replica. Bound the critical section and define recovery from expired holders. |
+| Idempotent replay | Deterministic operation records reject conflicting intent and survive replica replacement. | Detect a matching existing operation inside the serialized admission path before quota rejection. A replay must return the original result even when the tenant is currently at quota. |
+| Ambiguous create recovery | The controller repairs missing mappings after an upstream workload becomes visible. | Replace time-only pending-operation deletion with upstream-aware reconciliation. Never delete an operation merely because the controller or upstream API was unavailable, since that can permit duplicate creation. |
+| Pause fencing | Governance marks an assignment paused before proxying the upstream pause request. | Roll back or reconcile the pause fence when the upstream pause fails. Define timeout, retry, and ambiguous-result semantics for pause, resume, and delete. |
+| Transparent egress | Cilium proves default-deny TCP, UDP, DNS, and direct-address traffic. Exact mediated requests are allowed and attributed. | Inject a mandatory mediation path that upstream OpenSandbox cannot replace, authenticate the sandbox transparently, prevent bypass, and provide a controlled DNS resolver or proxy. |
+| Egress identity mode | The live POC uses `external-mediator` because the upstream create path replaces additional template containers. | Make `projected-sidecar`, node interception, or another transparent data plane the production default. The enforcement component must be outside sandbox control and fail closed. |
+| Physical tenancy | Logical tenant, team, template, and permission boundaries are enforced in one namespace and cluster. | Define when customers receive namespace, node-pool, cluster, network, key, or regional isolation. Prove cross-tenant resource, network, identity, cache, and telemetry isolation. |
+| Azure control-plane identity | Kubernetes TokenReview and ServiceAccount bindings authenticate lifecycle and sandbox callers. | Integrate Microsoft Entra ID, managed identities, workload identity federation, private endpoints, mTLS, certificate rotation, and Azure RBAC without accepting caller-asserted tenant context. |
+| Provider credentials | The broker proves exact-scope grants, revocation, replay denial, and signing-key grace. | Exchange grants for short-lived provider credentials through managed identity or provider federation. Store and rotate signing material in an Azure-managed key service and define outage behavior. |
+| Audit and telemetry | Required authorization audit is synchronous and fail closed in Kubernetes CRDs. Egress is attributed to assignment and Pod UID. | Export immutable audit and telemetry to a regional durable pipeline with retention, schema versioning, redaction, access control, query SLOs, and cross-region recovery. |
+| Snapshot product semantics | Pause/resume preserves workspace state while rotating Pod UID and rejecting stale authority. | Define snapshot consistency, encryption, size limits, retention, portability, deletion, restore compatibility, malware handling, billing, and tenant/key boundaries. |
+| Agent harness enforcement | The OpenCode harness demonstrates sandbox-only execution and governed elevation. | Enforce the boundary independently of prompt configuration. Attest the harness, authenticate tool calls, constrain extensions, and ensure host execution cannot be re-enabled by an agent or user. |
+| Service operability | Doctor checks, PDB, leader election, replay scripts, and fault experiments exist. | Define SLOs, capacity models, autoscaling, upgrade and rollback safety, regional failover, on-call diagnostics, customer-visible health, quota operations, and incident response. |
+| Abuse and compliance | Capability templates and exact elevation reduce accidental access. | Add abuse detection, malware and exfiltration controls, acceptable-use enforcement, legal retention/deletion behavior, compliance evidence, support access controls, and tenant notification workflows. |
+| Metering and billing | The POC records assignments, requests, grants, and egress events. | Produce reconciled, tamper-resistant meters for compute, storage, snapshot, network, and premium capabilities, including retries, partial failures, credits, and dispute handling. |
 
-## Important architecture finding
+## Second-review lifecycle findings
 
-The live POC uses `external-mediator` identity mode because the upstream
-OpenSandbox create path replaces additional containers from its base template.
-The sandbox therefore receives no projected Kubernetes credential, and the
-harness explicitly invokes assignmentd for governed external operations.
+These implementation issues should be fixed before treating the current control plane as
+a reusable service foundation.
 
-This proves authorization, attribution, audit, revocation, and forced L3/L4
-network denial, but it is not the final transparent data plane.
-`projected-sidecar` remains the fail-closed production default: a trusted
-admission component must inject the proxy and mount the Pod-bound identity only
-into that proxy. Missing injection, identity, or policy must leave the sandbox
-with no external route.
+### 1. Lease release is not fully fenced
 
-## Live experiments
+Kubernetes Lease takeover updates the same object, so its UID does not change. A holder
+that acquired the Lease earlier can therefore delete the object after another holder has
+updated it if release validates only the UID.
 
-The experiments ran on the dedicated AKS Standalone development cluster:
+The release operation should use holder identity plus `resourceVersion` as a conditional
+fence. A stale holder must receive a conflict and leave the newer holder's Lease intact.
+Tests should cover expiry, takeover, stale release, and controller restart.
 
-```text
-resource group: rg-osb-governance-poc-westus2
-cluster:        osb-governance-poc-aks
-Kubernetes:     v1.35.6
-network policy: Cilium
-```
+### 2. Replay can be rejected at quota
 
-Reproducible commands:
+Quota admission currently occurs before existing-operation detection. If a tenant is at
+its limit, replaying an already admitted idempotency key can return `403` rather than the
+recorded result.
+
+The serialized path should first look up the deterministic operation, validate the
+request hash, and return its state without consuming a new quota slot. Only a genuinely
+new operation should run quota admission.
+
+### 3. Time-only pending expiry risks duplicate creation
+
+A pending record can outlive its timeout while the upstream workload already exists but
+the assignment controller or upstream API is unavailable. Deleting that record makes the
+same idempotency key appear new and can create a duplicate workload.
+
+Pending operations should remain authoritative until reconciliation proves that no
+upstream operation or workload exists. If absence cannot be proven, surface an
+indeterminate state and continue recovery rather than permitting replacement.
+
+### 4. Failed pause can leave a false governance fence
+
+The governance pause marker is written before the upstream pause request. When that call
+fails, the marker remains and can deny credentials even though the workload is still
+running.
+
+Use a small operation state machine or compensating update so failure restores the prior
+state. Ambiguous timeouts should enter reconciliation rather than being reported as
+success or silently left fenced.
+
+## Required Azure-service investigations
+
+### Regional state and recovery
+
+- Evaluate an Azure-managed transactional store for lifecycle operations, assignments,
+  idempotency records, template versions, grants, and revocations.
+- Define consistency and failure semantics between the regional store, Kubernetes
+  control planes, and OpenSandbox runtime state.
+- Prove zone loss, cluster replacement, regional failover, backup restore, and
+  reconciliation from each source of truth.
+
+### Transparent network data plane
+
+- Prototype a production identity mode that survives upstream template rendering and
+  cannot be removed by the sandbox workload.
+- Add controlled DNS with policy decisions and attribution for both names and resolved
+  addresses.
+- Cover HTTP, HTTPS, raw TCP, UDP, redirects, proxies, IPv6, private endpoints, service
+  tags, CDN address churn, and long-lived connections.
+- Define fail-closed behavior when the policy service, audit sink, DNS service, or
+  identity issuer is unavailable.
+
+### Identity, credentials, and private connectivity
+
+- Map Azure subscription, tenant, resource, and principal identities to the internal
+  lifecycle principal without trusting request headers.
+- Use managed identity federation or provider-native token exchange instead of service
+  credentials held by the broker.
+- Move signing and encryption keys to an Azure-managed key boundary with rotation,
+  revocation, regional availability, and break-glass procedures.
+- Prove private-link and customer-network access without creating a cross-tenant routing
+  or DNS boundary violation.
+
+### Product and operational contracts
+
+- Define supported isolation tiers and the admin UX for choosing them.
+- Specify elevation approval ownership, expiration, emergency revocation, and policy
+  propagation SLOs.
+- Establish runtime, snapshot, network, audit, and credential SLOs with measurable error
+  budgets.
+- Define capacity, cost, billing, abuse response, compliance, support, data residency,
+  deletion, and incident-notification requirements.
+
+## Reproducing the proven baseline
+
+Run the complete presentation and boundary suite:
 
 ```bash
-# Core authentication, immutable-template, idempotency, restart, forced-egress,
-# and exact attribution checks.
-./scripts/p0-live-experiments.sh
+./scripts/live-demo.sh --no-pause --p0-boundaries
+```
 
-# Fail-closed audit, cross-replica quota serialization, and ambiguous-create
-# recovery.
+Or run the boundary experiments independently:
+
+```bash
+./scripts/extended-governance-demo.sh
 ./scripts/p0-fault-experiments.sh
-
-# Signing-key grace and stale-key rejection.
 ./scripts/p0-key-rotation-experiment.sh
-
-# Validation evidence, broker issue/use/revoke/replay, and snapshot pause/resume.
-RUN_SNAPSHOT=true ./scripts/extended-governance-demo.sh
+./scripts/p0-live-experiments.sh
+kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
+  --ignore-not-found
 ```
 
-Successful evidence:
-
-```text
-demo-output/p0-20260816T191432Z
-demo-output/p0-fault-20260816T190955Z
-demo-output/p0-rotation-20260816T190904Z
-demo-output/20260816T191604Z-extended
-```
-
-The final assignmentd deployment used:
-
-```text
-osbkata0815201155f3e68b.azurecr.io/opensandbox/assignmentd@sha256:7dcf9ba4d539ecc9ea1e60b7b34f24fe07fb2751c68fbfe85b930cc863b95d70
-```
-
-The forced-egress NetworkPolicies were removed before the extended OpenCode
-replay because `external-mediator` does not transparently proxy `git clone`.
-This is intentional evidence of the remaining integration gap: the secure
-default-deny proof works, and the governed harness flow works, but both become
-simultaneously usable only after the trusted egress data plane is injected.
-
-## Highest-priority work after this POC
-
-1. Replace SQLite/PVC metadata with an external highly available store and
-   define regional operation recovery.
-2. Implement the injected fail-closed egress proxy plus controlled DNS and
-   validate bypass resistance at L3 through L7.
-3. Move identity, key management, audit, and telemetry into Azure-managed
-   services with private connectivity.
-4. Define physical tenancy tiers: shared stamp, dedicated cluster, dedicated
-   subscription, and any tenant-specific isolation requirements.
-5. Add service SLOs, capacity admission, upgrade/rollback, incident response,
-   abuse prevention, compliance retention, billing, and customer support
-   workflows.
-6. Make templates, capability bundles, tenant policies, and access requests
-   first-class Kubernetes CRDs backed by an Azure resource-provider API and
-   portal experience.
+The last cleanup restores the external-mediator demo path after the forced-egress proof.
+See [live-demo-report.md](live-demo-report.md#verified-p0-service-boundaries) for expected
+results and sanitized evidence locations.

@@ -5,17 +5,22 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 pause=true
-case "${1:-}" in
-  "")
-    ;;
-  --no-pause)
-    pause=false
-    ;;
-  *)
-    echo "usage: $0 [--no-pause]" >&2
-    exit 2
-    ;;
-esac
+run_p0_boundaries="${RUN_P0_BOUNDARIES:-false}"
+while (($# > 0)); do
+  case "$1" in
+    --no-pause)
+      pause=false
+      ;;
+    --p0-boundaries)
+      run_p0_boundaries=true
+      ;;
+    *)
+      echo "usage: $0 [--no-pause] [--p0-boundaries]" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 export PATH="$HOME/.local/bin:$PATH"
@@ -36,6 +41,7 @@ mkdir -p "$output_dir"
 
 pids=()
 sandbox_id=""
+sandbox_status="active"
 assignment_name=""
 pod_name=""
 event_name=""
@@ -51,6 +57,7 @@ admin_template_name="demo-python-web-reader-$run_suffix"
 admin_bundle_created=false
 admin_template_created=false
 assignmentd_token_file="$output_dir/assignmentd-token"
+p0_network_policy_applied=false
 
 delete_sandbox_and_wait() {
   local id="$1"
@@ -120,6 +127,10 @@ cleanup() {
     kubectl -n "$assignment_namespace" delete capabilitybundle \
         "$admin_bundle_name" --ignore-not-found >/dev/null 2>&1 || exit_code=1
   fi
+  if [[ "$p0_network_policy_applied" == "true" ]]; then
+    kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
+      --ignore-not-found >/dev/null 2>&1 || exit_code=1
+  fi
   for pid in "${pids[@]}"; do
     kill "$pid" 2>/dev/null || true
   done
@@ -163,6 +174,19 @@ wait_for_port() {
     sleep 0.5
   done
   echo "$name did not open port $port; see $output_dir/${name}.log" >&2
+  exit 1
+}
+
+wait_for_closed_port() {
+  local port="$1"
+  local name="$2"
+  for _ in {1..60}; do
+    if ! port_is_open "$port"; then
+      return
+    fi
+    sleep 0.5
+  done
+  echo "$name still occupies port $port" >&2
   exit 1
 }
 
@@ -361,10 +385,10 @@ if kubectl -n "$assignment_namespace" get capabilitybundle \
 fi
 admin_bundle_created=true
 encoded_csrf="$(printf '%s' "$admin_csrf" | url_encode)"
-capability_body="csrf=${encoded_csrf}&name=${admin_bundle_name}&displayName=Live%20demo%20approved%20web%20reader&logicalTenant=tenant-a&team=web-readers&permissionLevel=reader&egressRules=external-web%20GET%20https%3A%2F%2Fexample.com%2Fdocs&allowedCommands="
+capability_body="csrf=${encoded_csrf}&name=${admin_bundle_name}&displayName=Live%20demo%20approved%20web%20reader&logicalTenant=tenant-a&team=web-readers&permissionLevel=reader&egressRules=external-web%20GET%20https%3A%2F%2Fexample.com%2Fdocs&allowedCommands=&validationRules="
 capability_status="$(
   printf '%s' "$capability_body" |
-  curl -sS -o /dev/null -w '%{http_code}' \
+    curl -sS -o "$output_dir/admin-capability-response.txt" -w '%{http_code}' \
     -H "Origin: http://127.0.0.1:${admin_port}" \
     -H 'Content-Type: application/x-www-form-urlencoded' \
     --data-binary @- \
@@ -372,6 +396,7 @@ capability_status="$(
 )"
 if [[ "$capability_status" != "303" ]]; then
   echo "capability creation returned HTTP $capability_status" >&2
+  cat "$output_dir/admin-capability-response.txt" >&2
   exit 1
 fi
 unset admin_page admin_csrf encoded_csrf capability_body capability_status
@@ -701,16 +726,46 @@ capture_page \
   false \
   520
 
+if [[ "$run_p0_boundaries" == "true" ]]; then
+  echo "==> Closing the presentation sandbox before P0 fault experiments"
+  delete_sandbox_and_wait "$sandbox_id" "$pod_name"
+  sandbox_status="cleaned"
+
+  echo "==> Replaying verified P0 service boundaries"
+  EXTENDED_DEMO_OUTPUT_DIR="$output_dir/extended-governance" \
+    ./scripts/extended-governance-demo.sh
+  P0_FAULT_OUTPUT_DIR="$output_dir/p0-fault" \
+    ./scripts/p0-fault-experiments.sh
+  P0_ROTATION_OUTPUT_DIR="$output_dir/p0-key-rotation" \
+    ./scripts/p0-key-rotation-experiment.sh
+  p0_network_policy_applied=true
+  P0_OUTPUT_DIR="$output_dir/p0-boundaries" \
+    ./scripts/p0-live-experiments.sh
+  kubectl delete -f deploy/governance/k8s/forced-egress-networkpolicy.yaml \
+    --ignore-not-found >/dev/null
+  p0_network_policy_applied=false
+
+  wait_for_closed_port "$assignment_port" assignment-port-forward
+  wait_for_closed_port "$authz_port" assignment-port-forward
+  start_background assignment-port-forward-after-p0 \
+    kubectl --address 127.0.0.1 port-forward \
+    -n "$assignment_namespace" svc/assignmentd \
+    "${assignment_port}:8080" "${authz_port}:9001"
+  wait_for_port "$assignment_port" assignment-port-forward-after-p0
+  wait_for_port "$authz_port" assignment-port-forward-after-p0
+fi
+
 cat <<EOF
 
 Live demonstration complete.
 
-Sandbox:       $sandbox_id
+Sandbox:       $sandbox_id ($sandbox_status)
 Assignment:    $assignment_name
 Access request: $request_name
 Admin bundle:   $admin_bundle_name
 Admin template: $admin_template_name
 Artifacts:     $output_dir
+P0 boundaries: $run_p0_boundaries
 
 Requester: http://127.0.0.1:${requester_port}/dashboard/
 Access:    http://127.0.0.1:${requester_port}/dashboard/access
@@ -719,5 +774,9 @@ EOF
 
 if [[ "$pause" == "true" && -t 0 ]]; then
   echo
-  read -r -p "Press Enter to delete the demo sandbox and stop local services..."
+  if [[ "$run_p0_boundaries" == "true" ]]; then
+    read -r -p "Press Enter to stop local services..."
+  else
+    read -r -p "Press Enter to delete the demo sandbox and stop local services..."
+  fi
 fi
