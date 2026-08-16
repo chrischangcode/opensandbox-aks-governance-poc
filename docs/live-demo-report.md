@@ -8,6 +8,9 @@ This report is the source of truth for controls proven by the POC. See
 unresolved Azure-service security, durability, tenancy, egress, and operability
 work.
 
+For product scenarios built on this enforcement model, see
+[enterprise use cases](enterprise-use-cases.md).
+
 Date: 2026-08-16
 
 This demonstration used a disposable AKS cluster with an isolated Kata node,

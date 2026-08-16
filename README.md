@@ -181,6 +181,18 @@ flowchart TB
 The detailed gap definitions and lifecycle edge cases are maintained in
 [Remaining P0 Service Work](docs/p0-service-boundary-findings.md).
 
+## Real-world product use cases
+
+| Customer | Managed sandbox product |
+|---|---|
+| Engineering organization | Ephemeral developer and coding-agent workspaces with repository-scoped identity, approved build/test commands, constrained package and test-system access, and temporary elevation. |
+| Enterprise legal platform | Matter-scoped research, e-discovery, and drafting agents that integrate with Lexis APIs, Relativity, and document-management ethical walls without exposing other clients' documents. |
+| Healthcare or life-sciences organization | Study-scoped clinical research agents using FHIR read roles, de-identification, private connectivity, controlled analysis tools, and explicit export approval. |
+
+See [Enterprise Use Cases for Managed Remote
+Sandboxes](docs/enterprise-use-cases.md) for concrete sandbox profiles,
+workflows, technology integrations, and source-system boundaries.
+
 ## Prerequisites
 
 - An Azure subscription where you can create AKS, ACR, role assignments, and resource groups
@@ -197,6 +209,7 @@ The detailed gap definitions and lifecycle edge cases are maintained in
 | `cmd/assignmentd/` | Assignment lifecycle facade and egress authorization service |
 | `cmd/aks-sandbox-dashboard/` | Requester and administrator pages |
 | `cmd/egress-probe/` | Sends an attributed authorization decision for a live sandbox |
+| `docs/enterprise-use-cases.md` | Grounded engineering, legal, and healthcare product scenarios |
 | `docs/live-demo-report.md` | Captured OpenCode, Kata, cleanup, and egress approval evidence |
 
 ## 1. Deploy OpenSandbox on AKS
