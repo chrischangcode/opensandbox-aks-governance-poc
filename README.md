@@ -617,9 +617,14 @@ Delete the disposable Azure environment:
 make infra-delete
 ```
 
-## Provenance
+## Origins and licensing
 
-The AKS/Kata bootstrap is derived from the public
-[`weinong/opensandbox-aks`](https://github.com/weinong/opensandbox-aks) POC and
-the upstream
-[`OpenSandbox` AKS Kata example](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/aks-kata).
+This independently maintained POC integrates with the upstream
+[`OpenSandbox`](https://github.com/opensandbox-group/OpenSandbox) project and
+uses public AKS, Kubernetes, Kata Containers, and Cilium interfaces. It does
+not include source files from the unlicensed `weinong/opensandbox-aks`
+repository.
+
+Repository-authored content is available under the [MIT License](LICENSE).
+External projects, packages, charts, and images retain their own licenses; see
+[third-party notices](THIRD_PARTY_NOTICES.md).

@@ -1333,7 +1333,7 @@ Do not choose a framework as a substitute for a threat model.
 | Networking | Cilium and NetworkPolicy | DNS, redirects, proxies, IPv6, private links, connection revocation |
 | Operations | Live experiments and recovery | SLOs, incident response, upgrades, support tooling |
 | Supply chain | Image digest pinning | Signing, provenance, SBOM policy, dependency response |
-| Public release | Security review completed | License and copied-file ownership approval |
+| Public release | Security review and MIT licensing completed | Continue dependency, image, and third-party license review |
 
 ---
 

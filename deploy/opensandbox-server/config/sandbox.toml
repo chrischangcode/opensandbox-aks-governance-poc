@@ -1,0 +1,35 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+max_sandbox_timeout_seconds = 3600
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "kubernetes"
+execd_image = "opensandbox/execd:v1.0.18"
+
+[kubernetes]
+namespace = "__NAMESPACE__"
+workload_provider = "batchsandbox"
+batchsandbox_template_file = "/app/batchsandbox-template.yaml"
+image_pull_policy = "IfNotPresent"
+sandbox_create_timeout_seconds = 120
+
+[secure_runtime]
+type = "kata"
+k8s_runtime_class = "kata-optimized"
+
+[ingress]
+mode = "__INGRESS_MODE__"
+__INGRESS_GATEWAY_ADDRESS__
+__INGRESS_GATEWAY_ROUTE_MODE__
+
+[egress]
+image = "opensandbox/egress:v1.1.1"
+mode = "dns"
+
+[store]
+type = "sqlite"
+path = "/var/lib/opensandbox/opensandbox.db"
