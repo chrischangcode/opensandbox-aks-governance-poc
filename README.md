@@ -31,6 +31,8 @@ architecture, exact redacted commands, terminal transcripts, implemented
 service boundaries, and replay steps. The
 [remaining P0 service work](docs/p0-service-boundary-findings.md) contains only
 the unresolved or partially proven work required for an Azure service.
+The [study guide](docs/study-guide.md) explains the POC's agentic, security,
+Kubernetes, networking, identity, and service-engineering concepts.
 
 | Running Kata sandbox | Administrator capability editor |
 |---|---|
